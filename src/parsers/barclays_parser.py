@@ -1,0 +1,301 @@
+"""Barclays bank statement parser.
+
+Handles Barclays-specific statement format with multi-line transactions
+and transaction boundary detection via indentation patterns.
+
+Format characteristics:
+- Multiple transactions can share same date
+- Descriptions span multiple lines
+- Balance only appears on LAST line of transaction
+- "Start balance" has no amounts (skipped)
+- Transaction start detected by 10+ space indentation
+- Date pattern excludes addresses like "5 SWEDEN PLACE"
+- Column layout: Date | Description | Money out | Money in | Balance
+- Rightmost amount is ALWAYS balance
+"""
+
+import logging
+import re
+from datetime import datetime
+from typing import Optional, List
+
+from .base_parser import BaseTransactionParser
+from ..models import Transaction
+from ..utils import parse_currency, parse_date, infer_year_from_period
+
+logger = logging.getLogger(__name__)
+
+
+class BarclaysParser(BaseTransactionParser):
+    """Parser for Barclays bank statements."""
+
+    def parse_transactions(
+        self,
+        text: str,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> List[Transaction]:
+        """
+        Parse Barclays statement using layout-based extraction.
+
+        Barclays format:
+        - Date column (0-12)
+        - Description column (13-65) - MULTI-LINE
+        - Money out column (65-85)
+        - Money in column (85-105)
+        - Balance column (105-125)
+
+        Key characteristics:
+        - Multiple transactions can share same date
+        - Descriptions span multiple lines
+        - Balance only appears on LAST line of transaction
+        - "Start balance" has no amounts
+
+        Args:
+            text: Raw text from pdftotext
+            statement_start_date: Statement period start
+            statement_end_date: Statement period end
+
+        Returns:
+            List of Transaction objects
+        """
+        lines = text.split('\n')
+        transactions = []
+
+        # Header pattern
+        header_pattern = re.compile(r'Date\s+Description\s+Money out\s+Money in\s+Balance', re.IGNORECASE)
+
+        # Find header to get column positions
+        header_line_idx = None
+        for idx, line in enumerate(lines):
+            if header_pattern.search(line):
+                header_line_idx = idx
+                logger.debug(f"Found Barclays header at line {idx}")
+                break
+
+        if header_line_idx is None:
+            logger.warning("Could not find Barclays transaction table header")
+            return transactions
+
+        # Extract column positions from header
+        header_line = lines[header_line_idx]
+        money_out_match = re.search(r'Money out', header_line)
+        money_in_match = re.search(r'Money in', header_line)
+        balance_match = re.search(r'Balance', header_line)
+
+        if not (money_out_match and money_in_match and balance_match):
+            logger.warning("Could not determine Barclays column positions")
+            return transactions
+
+        money_out_start = money_out_match.start()
+        money_in_start = money_in_match.start()
+        balance_start = balance_match.start()
+
+        # Calculate thresholds (midpoints between columns)
+        MONEY_OUT_THRESHOLD = (money_out_start + money_in_start) // 2
+        MONEY_IN_THRESHOLD = (money_in_start + balance_start) // 2
+
+        logger.info(f"Barclays column thresholds: money_out={MONEY_OUT_THRESHOLD}, money_in={MONEY_IN_THRESHOLD}")
+
+        # Date pattern: "DD MMM" or "DD MMM YYYY" at start of line
+        # This prevents matching addresses like "5 SWEDEN PLACE"
+        date_pattern = re.compile(r'^(\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?)(?:\s|$)', re.IGNORECASE)
+
+        # Amount pattern: decimal number with optional commas
+        amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+
+        # Transaction start pattern: description starting around column 13
+        # Typical: "             Card Payment to..." or "             Direct Debit to..."
+        transaction_start_pattern = re.compile(
+            r'^\s{10,}(Card Payment|Direct Debit|Bill Payment|Received From|Standing Order|Cash machine|Automated Payment|Card Purchase)',
+            re.IGNORECASE
+        )
+
+        # Process lines after header
+        current_date_str = None
+        current_description_lines = []
+        current_transaction_amounts = []  # Store (position, amount) tuples
+
+        for idx in range(header_line_idx + 1, len(lines)):
+            line = lines[idx]
+
+            # Skip empty lines
+            if not line.strip():
+                continue
+
+            # Check if this line has a date
+            date_match = date_pattern.match(line)
+
+            # Check if this is the start of a new transaction description
+            is_transaction_start = transaction_start_pattern.search(line)
+
+            # Check if this line has amounts
+            amounts_with_pos = []
+            for match in amount_pattern.finditer(line):
+                amt_str = match.group(1)
+                pos = match.start()
+                amounts_with_pos.append((amt_str, pos))
+
+            # If we see a new transaction description starting, complete the previous one
+            if is_transaction_start and current_description_lines:
+                # Save previous transaction
+                transaction = self._build_barclays_transaction(
+                    current_date_str,
+                    current_description_lines,
+                    current_transaction_amounts,
+                    MONEY_OUT_THRESHOLD,
+                    MONEY_IN_THRESHOLD,
+                    statement_start_date,
+                    statement_end_date
+                )
+                if transaction:
+                    transactions.append(transaction)
+
+                # Start new transaction (keep same date)
+                current_description_lines = [line]
+                current_transaction_amounts = amounts_with_pos
+
+            # If we have a date, start a new transaction group
+            elif date_match:
+                # Save previous transaction if any
+                if current_description_lines and current_transaction_amounts:
+                    transaction = self._build_barclays_transaction(
+                        current_date_str,
+                        current_description_lines,
+                        current_transaction_amounts,
+                        MONEY_OUT_THRESHOLD,
+                        MONEY_IN_THRESHOLD,
+                        statement_start_date,
+                        statement_end_date
+                    )
+                    if transaction:
+                        transactions.append(transaction)
+
+                # Start new transaction
+                current_date_str = date_match.group(1)
+                current_description_lines = [line]
+                current_transaction_amounts = amounts_with_pos
+
+            # Otherwise, accumulate description lines (e.g., "On 11 Dec" continuation lines)
+            else:
+                if current_date_str:
+                    current_description_lines.append(line)
+                    current_transaction_amounts.extend(amounts_with_pos)
+
+        # Handle final transaction
+        if current_description_lines and current_transaction_amounts:
+            transaction = self._build_barclays_transaction(
+                current_date_str,
+                current_description_lines,
+                current_transaction_amounts,
+                MONEY_OUT_THRESHOLD,
+                MONEY_IN_THRESHOLD,
+                statement_start_date,
+                statement_end_date
+            )
+            if transaction:
+                transactions.append(transaction)
+
+        logger.info(f"Parsed {len(transactions)} Barclays transactions")
+        return transactions
+
+    def _build_barclays_transaction(
+        self,
+        date_str: str,
+        description_lines: List[str],
+        amounts_with_pos: List[tuple],
+        money_out_threshold: int,
+        money_in_threshold: int,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> Optional[Transaction]:
+        """
+        Build a Barclays transaction from accumulated lines.
+
+        Args:
+            date_str: Date string (e.g., "13 Dec")
+            description_lines: List of description lines
+            amounts_with_pos: List of (amount_str, position) tuples
+            money_out_threshold: Column threshold for money out
+            money_in_threshold: Column threshold for money in
+            statement_start_date: Statement period start
+            statement_end_date: Statement period end
+
+        Returns:
+            Transaction object or None
+        """
+        # Parse date with year inference
+        transaction_date = None
+        if statement_start_date and statement_end_date:
+            transaction_date = infer_year_from_period(
+                date_str,
+                statement_start_date,
+                statement_end_date
+            )
+        else:
+            transaction_date = parse_date(date_str, self.config.date_formats)
+
+        if not transaction_date:
+            logger.warning(f"Could not parse Barclays date: {date_str}")
+            return None
+
+        # Build description from all lines
+        full_description = ' '.join(description_lines)
+        # Remove date from description
+        full_description = re.sub(r'^\s*\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?\s*', '', full_description, flags=re.IGNORECASE)
+        full_description = ' '.join(full_description.split())  # Normalize whitespace
+
+        # Skip "Start balance" transactions
+        if "Start balance" in full_description:
+            logger.debug(f"Skipping 'Start balance' line")
+            return None
+
+        # Classify amounts by position
+        # Strategy: Rightmost amount is ALWAYS balance. Other amounts are transaction amounts.
+        money_out = 0.0
+        money_in = 0.0
+        balance = 0.0
+
+        if not amounts_with_pos:
+            logger.warning(f"No amounts found for Barclays transaction: {full_description[:50]}")
+        elif len(amounts_with_pos) == 1:
+            # Single amount - must be balance (e.g., "Start balance")
+            amt_str, pos = amounts_with_pos[0]
+            balance = parse_currency(amt_str) or 0.0
+        else:
+            # Multiple amounts: rightmost is balance, others are transaction amounts
+            # Sort by position to find rightmost
+            sorted_amounts = sorted(amounts_with_pos, key=lambda x: x[1])
+
+            # Rightmost = balance
+            balance_str, _ = sorted_amounts[-1]
+            balance = parse_currency(balance_str) or 0.0
+
+            # Classify remaining amounts by their column position
+            for amt_str, pos in sorted_amounts[:-1]:
+                amt = parse_currency(amt_str) or 0.0
+
+                # Middle column = money in
+                if pos >= money_out_threshold:
+                    money_in += amt  # Sum if multiple amounts in same column
+                # Left column = money out
+                else:
+                    money_out += amt
+
+        # Calculate confidence
+        confidence = self._calculate_confidence(
+            transaction_date,
+            full_description,
+            money_in,
+            money_out,
+            balance
+        )
+
+        return Transaction(
+            date=transaction_date,
+            description=full_description,
+            money_in=money_in,
+            money_out=money_out,
+            balance=balance,
+            confidence=confidence
+        )
