@@ -1,0 +1,134 @@
+# NatWest Bank Configuration
+# Based on actual statement format from screenshots
+
+natwest:
+  identifiers:
+    - "NatWest"
+    - "National Westminster Bank"
+    - "NWBKGB2L"  # BIC code
+  
+  # Statement header fields
+  header_patterns:
+    account_name: "Account Name\\s+(.+?)(?=Account No)"
+    account_number: "Account No\\s+(\\d+)"
+    sort_code: "Sort Code\\s+(\\d{2}-\\d{2}-\\d{2})"
+    statement_date: "Statement Date\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
+    period_start: "Period Covered\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
+    period_end: "to\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
+    previous_balance: "Previous Balance\\s+£([\\d,]+\\.\\d{2})"
+    paid_in: "Paid In\\s+£([\\d,]+\\.\\d{2})"
+    withdrawn: "Withdrawn\\s+£([\\d,]+\\.\\d{2})"
+    new_balance: "New Balance\\s+£([\\d,]+\\.\\d{2})"
+    iban: "IBAN\\s+([A-Z0-9]+)"
+  
+  # Date formats used in this statement
+  date_formats:
+    - "%d %b %Y"      # "18 DEC 2024"
+    - "%d %b"         # "19 DEC" (year inferred from statement period)
+    - "%d %B %Y"      # "18 December 2024"
+  
+  # Transaction table structure
+  table_structure:
+    columns:
+      - date
+      - description
+      - paid_in        # Money IN
+      - withdrawn      # Money OUT
+      - balance
+    
+    # Column positions (approximate character positions)
+    column_boundaries:
+      date_start: 0
+      date_end: 15
+      description_start: 16
+      description_end: 500  # Multi-line descriptions
+      paid_in_start: 500
+      paid_in_end: 560
+      withdrawn_start: 560
+      withdrawn_end: 620
+      balance_start: 620
+      balance_end: 700
+  
+  # Transaction type keywords (for categorization)
+  transaction_types:
+    direct_debit:
+      - "Direct Debit"
+      - "DD"
+    
+    card_payment:
+      - "Card Transaction"
+      - "Debit Card"
+    
+    online_transfer:
+      - "OnLine Transaction"
+      - "VIA MOBILE"
+      - "PYMT"
+    
+    automated_credit:
+      - "Automated Credit"
+      - "BACS"
+      - "FASTER PAYMENT"
+      - "FP"
+    
+    standing_order:
+      - "Standing Order"
+      - "SO"
+    
+    atm_withdrawal:
+      - "ATM"
+      - "CASH"
+    
+    interest:
+      - "Interest"
+      - "CREDIT INTEREST"
+    
+    fee:
+      - "Fee"
+      - "Charge"
+      - "Service Charge"
+  
+  # Special transaction markers
+  special_transactions:
+    brought_forward: "BROUGHT FORWARD"  # Opening balance
+    carried_forward: "CARRIED FORWARD"  # Page break
+  
+  # Validation rules specific to NatWest
+  validation:
+    # Balance should reconcile exactly
+    balance_tolerance: 0.01
+    
+    # Date should be in chronological order (or same date)
+    enforce_date_order: true
+    
+    # Description should not be empty
+    require_description: true
+  
+  # Field mapping to standardized output
+  field_mapping:
+    paid_in: "money_in"
+    withdrawn: "money_out"
+    date: "date"
+    description: "description"
+    balance: "balance"
+
+# Example transaction patterns for regex extraction
+transaction_patterns:
+  # Pattern for standard transaction line
+  standard: |
+    ^(?P<date>\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?)\s+
+    (?P<description>.+?)\s+
+    (?P<paid_in>[\d,]+\.\d{2})?\s*
+    (?P<withdrawn>[\d,]+\.\d{2})?\s*
+    (?P<balance>[\d,]+\.\d{2})$
+  
+  # Pattern for multi-line descriptions (description continues on next line)
+  continuation: |
+    ^\s{15,}(?P<description_cont>.+?)$
+
+# Notes for parser implementation:
+# 1. NatWest uses multi-line descriptions - need to handle line continuation
+# 2. Dates can be with or without year - infer year from statement period
+# 3. "BROUGHT FORWARD" transaction shows opening balance
+# 4. Some descriptions include reference numbers/codes (long alphanumeric strings)
+# 5. Amounts are formatted with commas for thousands: £1,234.56
+# 6. Empty cells in Paid In or Withdrawn columns (only one will have value per row)
