@@ -51,12 +51,15 @@ class BalanceValidator:
         """
         Validate that all transaction balances reconcile.
 
+        Automatically detects combined statements (multiple "BROUGHT FORWARD" markers)
+        and validates each period separately.
+
         Each transaction's balance should equal:
         previous_balance + money_in - money_out
 
         Args:
             transactions: List of transactions in chronological order
-            opening_balance: Starting balance
+            opening_balance: Starting balance (only used if single statement)
 
         Returns:
             ValidationResult with success status and details
@@ -67,6 +70,17 @@ class BalanceValidator:
                 message="No transactions to validate"
             )
 
+        # Detect if this is a combined statement (multiple BROUGHT FORWARD)
+        brought_forward_indices = [
+            i for i, txn in enumerate(transactions)
+            if 'BROUGHT FORWARD' in txn.description.upper()
+        ]
+
+        if len(brought_forward_indices) > 1:
+            logger.info(f"Detected combined statement with {len(brought_forward_indices)} periods")
+            return self._validate_combined_statements(transactions, brought_forward_indices)
+
+        # Single statement - validate normally
         logger.info(f"Validating {len(transactions)} transactions")
         logger.debug(f"Opening balance: £{opening_balance:.2f}")
 
@@ -104,6 +118,81 @@ class BalanceValidator:
             )
 
         success_msg = f"All {len(transactions)} transactions reconciled successfully"
+        logger.info(success_msg)
+
+        return ValidationResult(
+            success=True,
+            message=success_msg
+        )
+
+    def _validate_combined_statements(
+        self,
+        transactions: list[Transaction],
+        brought_forward_indices: list[int]
+    ) -> ValidationResult:
+        """
+        Validate combined statement with multiple periods.
+
+        Each "BROUGHT FORWARD" marks the start of a new statement period.
+        We validate each period independently.
+
+        Args:
+            transactions: All transactions
+            brought_forward_indices: Indices of BROUGHT FORWARD transactions
+
+        Returns:
+            ValidationResult
+        """
+        total_periods = len(brought_forward_indices)
+        failed_periods = []
+
+        for period_num, start_idx in enumerate(brought_forward_indices, 1):
+            # Determine end of this period (start of next period or end of list)
+            if period_num < total_periods:
+                end_idx = brought_forward_indices[period_num]
+            else:
+                end_idx = len(transactions)
+
+            # Extract period transactions
+            period_txns = transactions[start_idx:end_idx]
+            opening_balance = period_txns[0].balance  # BROUGHT FORWARD balance
+
+            # Validate this period
+            calculated_balance = opening_balance
+            period_errors = 0
+
+            for i, txn in enumerate(period_txns):
+                calculated_balance += txn.money_in - txn.money_out
+                difference = abs(calculated_balance - txn.balance)
+
+                if difference > self.tolerance:
+                    period_errors += 1
+                    if period_errors == 1:  # Log first error only
+                        logger.warning(
+                            f"Period {period_num} error at txn {start_idx + i + 1}: "
+                            f"Expected £{calculated_balance:.2f}, Got £{txn.balance:.2f}"
+                        )
+
+            if period_errors > 0:
+                failed_periods.append(period_num)
+
+            logger.debug(f"Period {period_num}: {len(period_txns)} txns, {period_errors} errors")
+
+        if failed_periods:
+            error_msg = (
+                f"Combined statement validation: {len(failed_periods)}/{total_periods} "
+                f"periods failed (periods: {failed_periods})"
+            )
+            logger.error(error_msg)
+            return ValidationResult(
+                success=False,
+                message=error_msg
+            )
+
+        success_msg = (
+            f"Combined statement validated successfully: "
+            f"{total_periods} periods, {len(transactions)} total transactions"
+        )
         logger.info(success_msg)
 
         return ValidationResult(
