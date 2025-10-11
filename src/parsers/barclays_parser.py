@@ -109,7 +109,7 @@ class BarclaysParser(BaseTransactionParser):
         # Transaction start pattern: description starting around column 13
         # Typical: "             Card Payment to..." or "             Direct Debit to..."
         transaction_start_pattern = re.compile(
-            r'^\s{10,}(Card Payment|Direct Debit|Bill Payment|Received From|Standing Order|Cash machine|Automated Payment|Card Purchase|Transfer)',
+            r'^\s{10,}(Card Payment|Direct Debit|Bill Payment|Received From|Refund From|Standing Order|Cash machine|Automated Payment|Card Purchase|Transfer)',
             re.IGNORECASE
         )
 
@@ -232,8 +232,10 @@ class BarclaysParser(BaseTransactionParser):
                     # Valid continuation patterns
                     valid_continuation_patterns = [
                         r'^\s{10,}On \d{1,2} [A-Z][a-z]{2}',  # "On XX Xxx" date reference
+                        r'^\s{10,}\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?$',  # "12 Dec" or "12 Dec 2023" (bare date for Refund From)
                         r'^\s{10,}Ref:',  # "Ref: XXX" reference
                         r'^\s{10,}Account \d+',  # "Account XXXXXXXX" account number
+                        r'^\s{10,}Timed at',  # "Timed at XX.XX" for cash machine withdrawals
                     ]
 
                     is_valid_continuation = False
@@ -243,14 +245,22 @@ class BarclaysParser(BaseTransactionParser):
                             break
 
                     if is_valid_continuation:
-                        # Debug: Log if continuation line adds amounts
-                        if amounts_with_pos:
-                            desc_preview = ' '.join(current_description_lines)[:40]
-                            amounts_str = ', '.join([f"{amt}@{pos}" for amt, pos in amounts_with_pos])
-                            logger.debug(f"Continuation line adds amounts: {amounts_str} to transaction: {desc_preview}")
+                        # Special case: bare date line (e.g., "12 Dec") updates the transaction date
+                        # This happens with "Refund From" transactions where date is on second line
+                        bare_date_match = re.match(r'^\s{10,}(\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?)$', line, re.IGNORECASE)
+                        if bare_date_match:
+                            # Update the current transaction's date
+                            current_date_str = bare_date_match.group(1)
+                            logger.debug(f"Updated transaction date from continuation line: {current_date_str}")
+                        else:
+                            # Debug: Log if continuation line adds amounts
+                            if amounts_with_pos:
+                                desc_preview = ' '.join(current_description_lines)[:40]
+                                amounts_str = ', '.join([f"{amt}@{pos}" for amt, pos in amounts_with_pos])
+                                logger.debug(f"Continuation line adds amounts: {amounts_str} to transaction: {desc_preview}")
 
-                        current_description_lines.append(line)
-                        current_transaction_amounts.extend(amounts_with_pos)
+                            current_description_lines.append(line)
+                            current_transaction_amounts.extend(amounts_with_pos)
                     # else: silently skip invalid continuation lines
 
         # Handle final transaction
