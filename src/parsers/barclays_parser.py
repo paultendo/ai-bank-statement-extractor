@@ -109,7 +109,7 @@ class BarclaysParser(BaseTransactionParser):
         # Transaction start pattern: description starting around column 13
         # Typical: "             Card Payment to..." or "             Direct Debit to..."
         transaction_start_pattern = re.compile(
-            r'^\s{10,}(Card Payment|Direct Debit|Bill Payment|Received From|Standing Order|Cash machine|Automated Payment|Card Purchase)',
+            r'^\s{10,}(Card Payment|Direct Debit|Bill Payment|Received From|Standing Order|Cash machine|Automated Payment|Card Purchase|Transfer)',
             re.IGNORECASE
         )
 
@@ -130,8 +130,36 @@ class BarclaysParser(BaseTransactionParser):
             if "Start balance" in line and not re.match(r'^\d{1,2}\s+[A-Z][a-z]{2}', line):
                 continue
 
+            # Check if we've hit another header row (indicates end of current period)
+            # This prevents accumulating page footers and next page headers into transactions
+            if header_pattern.search(line):
+                logger.debug(f"Found header at line {idx}, saving current transaction and resetting")
+                # Save current transaction if any
+                if current_description_lines and current_transaction_amounts:
+                    transaction = self._build_barclays_transaction(
+                        current_date_str,
+                        current_description_lines,
+                        current_transaction_amounts,
+                        MONEY_OUT_THRESHOLD,
+                        MONEY_IN_THRESHOLD,
+                        statement_start_date,
+                        statement_end_date
+                    )
+                    if transaction:
+                        transactions.append(transaction)
+                # Reset for next period
+                current_date_str = None
+                current_description_lines = []
+                current_transaction_amounts = []
+                continue
+
             # Check if this line has a date
             date_match = date_pattern.match(line)
+
+            # Skip "End balance" transactions (these are summary lines, not real transactions)
+            if date_match and re.search(r'End balance', line, re.IGNORECASE):
+                logger.debug(f"Skipping 'End balance' summary line: {line[:60]}")
+                continue
 
             # Check if this is the start of a new transaction description
             is_transaction_start = transaction_start_pattern.search(line)
@@ -189,11 +217,38 @@ class BarclaysParser(BaseTransactionParser):
                 current_description_lines = [line]
                 current_transaction_amounts = amounts_with_pos
 
-            # Otherwise, accumulate description lines (e.g., "On 11 Dec" continuation lines)
+            # Otherwise, check if this is a valid continuation line
             else:
                 if current_date_str:
-                    current_description_lines.append(line)
-                    current_transaction_amounts.extend(amounts_with_pos)
+                    # Only accumulate lines that look like valid continuations:
+                    # - "On XX Xxx" pattern
+                    # - "Ref: XXX" pattern
+                    # - Lines starting with whitespace (column ~13) and having text
+                    # - NOT lines that are page footers, bank info, or other junk
+
+                    # Skip lines that are clearly not continuations
+                    skip_patterns = [
+                        r'^\s*End balance',
+                        r'^\s*Page \d+',
+                        r'Barclays Bank UK PLC',
+                        r'Financial Services',
+                        r'Regulation Authority',
+                        r'Registered Office',
+                        r'^\s*Your (transactions|accounts|balances)',
+                        r'^\s*(Bank Giro|Cash machine|Contactless|Debit Card|Direct Debit|Online|Other)\s*$',
+                        r'^\s*Anything Wrong\?',
+                        r'^\s*Credit interest rates',
+                    ]
+
+                    should_skip = False
+                    for pattern in skip_patterns:
+                        if re.search(pattern, line, re.IGNORECASE):
+                            should_skip = True
+                            break
+
+                    if not should_skip:
+                        current_description_lines.append(line)
+                        current_transaction_amounts.extend(amounts_with_pos)
 
         # Handle final transaction
         if current_description_lines and current_transaction_amounts:
@@ -340,23 +395,20 @@ class BarclaysParser(BaseTransactionParser):
             # Use the END position of the amount for better accuracy
             amt_end = pos + len(amt_str)
 
-            # Distances from amount END to each column END (approximate)
-            # Money out column ends around position 82 (before Money in at 85)
-            # Money in column ends around position 102 (before Balance at 105)
-            # Balance column ends around position 125
-            dist_to_money_out = abs(amt_end - 82)
-            dist_to_money_in = abs(amt_end - 102)
-            dist_to_balance = abs(amt_end - 125)
+            # Classify based on column ranges (from header analysis):
+            # Money out column: positions 65-84 (header "Money out" at 65, column ends at 84)
+            # Money in column: positions 85-104 (header "Money in" at 85, column ends at 104)
+            # Balance column: positions 105+ (header "Balance" at 105)
 
-            # Classify based on closest column
-            min_dist = min(dist_to_money_out, dist_to_money_in, dist_to_balance)
-
-            if min_dist == dist_to_balance:
+            if amt_end >= 105:
+                # Amount ends in Balance column
                 balance = amt
-            elif min_dist == dist_to_money_in:
+            elif amt_end >= 85:
+                # Amount ends in Money in column
                 money_in = amt
                 balance = 0.0  # Will be calculated later
             else:
+                # Amount ends in Money out column (or before)
                 money_out = amt
                 balance = 0.0  # Will be calculated later
         else:
@@ -368,18 +420,15 @@ class BarclaysParser(BaseTransactionParser):
             balance_str, balance_pos = sorted_amounts[-1]
             balance = parse_currency(balance_str) or 0.0
 
-            # Classify remaining amounts by their column position using distance method
+            # Classify remaining amounts by their column position using range check
             for amt_str, pos in sorted_amounts[:-1]:
                 amt = parse_currency(amt_str) or 0.0
                 amt_end = pos + len(amt_str)
 
-                # Calculate distances to column ends
-                dist_to_money_out = abs(amt_end - 82)
-                dist_to_money_in = abs(amt_end - 102)
-
-                # Classify based on closest column (balance already handled)
-                # In case of tie, prefer money_in (as it's to the right)
-                if dist_to_money_in <= dist_to_money_out:
+                # Classify based on column ranges (balance already handled as rightmost)
+                # Money out column: ends before position 85
+                # Money in column: ends between 85 and 104
+                if amt_end >= 85:
                     money_in += amt  # Sum if multiple amounts in same column
                 else:
                     money_out += amt
