@@ -197,6 +197,46 @@ class BarclaysParser(BaseTransactionParser):
                 transactions.append(transaction)
 
         logger.info(f"Parsed {len(transactions)} Barclays transactions")
+
+        # Post-process: Calculate running balances
+        # Barclays only shows balance on LAST transaction per date group
+        # Need to backfill balances for intermediate transactions
+        transactions = self._calculate_running_balances(transactions)
+
+        return transactions
+
+    def _calculate_running_balances(self, transactions: List[Transaction]) -> List[Transaction]:
+        """
+        Calculate running balances for Barclays transactions.
+
+        Barclays only shows balance on the LAST transaction for each date.
+        We need to calculate balances for intermediate transactions by working
+        backwards from transactions that have balances.
+
+        Args:
+            transactions: List of transactions with some missing balances
+
+        Returns:
+            List of transactions with all balances calculated
+        """
+        if not transactions:
+            return transactions
+
+        logger.debug("Calculating running balances for Barclays transactions")
+
+        # Work through transactions and calculate missing balances
+        for i in range(len(transactions)):
+            if transactions[i].balance == 0.0 and i > 0:
+                # No balance on this transaction - calculate from previous
+                prev_balance = transactions[i - 1].balance
+                calculated_balance = prev_balance + transactions[i].money_in - transactions[i].money_out
+                transactions[i].balance = calculated_balance
+                logger.debug(
+                    f"Calculated balance for txn {i+1} ({transactions[i].description[:30]}): "
+                    f"£{prev_balance:.2f} + £{transactions[i].money_in:.2f} - "
+                    f"£{transactions[i].money_out:.2f} = £{calculated_balance:.2f}"
+                )
+
         return transactions
 
     def _build_barclays_transaction(
@@ -260,9 +300,21 @@ class BarclaysParser(BaseTransactionParser):
         if not amounts_with_pos:
             logger.warning(f"No amounts found for Barclays transaction: {full_description[:50]}")
         elif len(amounts_with_pos) == 1:
-            # Single amount - must be balance (e.g., "Start balance")
+            # Single amount - check position to determine if it's balance or transaction amount
             amt_str, pos = amounts_with_pos[0]
-            balance = parse_currency(amt_str) or 0.0
+            amt = parse_currency(amt_str) or 0.0
+
+            # If in balance column (rightmost), it's a balance
+            if pos >= money_in_threshold:
+                balance = amt
+            # If in money_in column, it's money in (no balance shown)
+            elif pos >= money_out_threshold:
+                money_in = amt
+                balance = 0.0  # Will be calculated later
+            # If in money_out column, it's money out (no balance shown)
+            else:
+                money_out = amt
+                balance = 0.0  # Will be calculated later
         else:
             # Multiple amounts: rightmost is balance, others are transaction amounts
             # Sort by position to find rightmost
