@@ -179,6 +179,12 @@ class BarclaysParser(BaseTransactionParser):
 
             # If we see a new transaction description starting, complete the previous one
             if is_transaction_start and current_description_lines:
+                # Debug: Log amounts being processed
+                if len(current_transaction_amounts) > 2:
+                    desc_preview = ' '.join(current_description_lines)[:60]
+                    amounts_str = ', '.join([f"{amt}@{pos}" for amt, pos in current_transaction_amounts])
+                    logger.warning(f"Transaction has {len(current_transaction_amounts)} amounts! Desc: {desc_preview}, Amounts: {amounts_str}")
+
                 # Save previous transaction
                 transaction = self._build_barclays_transaction(
                     current_date_str,
@@ -220,35 +226,32 @@ class BarclaysParser(BaseTransactionParser):
             # Otherwise, check if this is a valid continuation line
             else:
                 if current_date_str:
-                    # Only accumulate lines that look like valid continuations:
-                    # - "On XX Xxx" pattern
-                    # - "Ref: XXX" pattern
-                    # - Lines starting with whitespace (column ~13) and having text
-                    # - NOT lines that are page footers, bank info, or other junk
+                    # STRICT validation: Only accept specific continuation patterns
+                    # This prevents accumulating page footers and bank information
 
-                    # Skip lines that are clearly not continuations
-                    skip_patterns = [
-                        r'^\s*End balance',
-                        r'^\s*Page \d+',
-                        r'Barclays Bank UK PLC',
-                        r'Financial Services',
-                        r'Regulation Authority',
-                        r'Registered Office',
-                        r'^\s*Your (transactions|accounts|balances)',
-                        r'^\s*(Bank Giro|Cash machine|Contactless|Debit Card|Direct Debit|Online|Other)\s*$',
-                        r'^\s*Anything Wrong\?',
-                        r'^\s*Credit interest rates',
+                    # Valid continuation patterns
+                    valid_continuation_patterns = [
+                        r'^\s{10,}On \d{1,2} [A-Z][a-z]{2}',  # "On XX Xxx" date reference
+                        r'^\s{10,}Ref:',  # "Ref: XXX" reference
+                        r'^\s{10,}Account \d+',  # "Account XXXXXXXX" account number
                     ]
 
-                    should_skip = False
-                    for pattern in skip_patterns:
+                    is_valid_continuation = False
+                    for pattern in valid_continuation_patterns:
                         if re.search(pattern, line, re.IGNORECASE):
-                            should_skip = True
+                            is_valid_continuation = True
                             break
 
-                    if not should_skip:
+                    if is_valid_continuation:
+                        # Debug: Log if continuation line adds amounts
+                        if amounts_with_pos:
+                            desc_preview = ' '.join(current_description_lines)[:40]
+                            amounts_str = ', '.join([f"{amt}@{pos}" for amt, pos in amounts_with_pos])
+                            logger.debug(f"Continuation line adds amounts: {amounts_str} to transaction: {desc_preview}")
+
                         current_description_lines.append(line)
                         current_transaction_amounts.extend(amounts_with_pos)
+                    # else: silently skip invalid continuation lines
 
         # Handle final transaction
         if current_description_lines and current_transaction_amounts:
@@ -420,10 +423,18 @@ class BarclaysParser(BaseTransactionParser):
             balance_str, balance_pos = sorted_amounts[-1]
             balance = parse_currency(balance_str) or 0.0
 
+            # Debug: Log if description contains "Transfer From"
+            if "Transfer From" in full_description and len(sorted_amounts) == 2:
+                logger.warning(f"Transfer From with 2 amounts: {sorted_amounts}, balance={balance}, desc={full_description[:50]}")
+
             # Classify remaining amounts by their column position using range check
             for amt_str, pos in sorted_amounts[:-1]:
                 amt = parse_currency(amt_str) or 0.0
                 amt_end = pos + len(amt_str)
+
+                # Debug: Log classification
+                if "Transfer From" in full_description:
+                    logger.warning(f"Classifying {amt_str} (pos {pos}, end {amt_end}): {'Money IN' if amt_end >= 85 else 'Money OUT'}")
 
                 # Classify based on column ranges (balance already handled as rightmost)
                 # Money out column: ends before position 85
