@@ -1,6 +1,7 @@
 """Transaction parser with multi-line description support."""
 import logging
 import re
+import sys
 from typing import Optional
 from datetime import datetime
 
@@ -154,18 +155,25 @@ class TransactionParser:
         """
         self.config = bank_config
         self.transaction_pattern = self._compile_pattern()
-        self.multiline_extractor = MultilineDescriptionExtractor(
-            self.transaction_pattern
-        )
+        self.multiline_extractor = None
+        if self.transaction_pattern:
+            self.multiline_extractor = MultilineDescriptionExtractor(
+                self.transaction_pattern
+            )
 
         # Column positions for debit/credit classification (Monopoly pattern)
         self.paid_in_pos = None
         self.withdrawn_pos = None
         self.header_line_idx = None
 
-    def _compile_pattern(self) -> re.Pattern:
+    def _compile_pattern(self) -> Optional[re.Pattern]:
         """Compile transaction regex pattern from config."""
         pattern_dict = self.config.transaction_patterns
+
+        # Banks with custom parsers (Halifax, HSBC) don't need patterns
+        if self.config.bank_name.lower() in ['halifax', 'hsbc']:
+            return None
+
         if not pattern_dict:
             raise ValueError(f"No transaction patterns defined for {self.config.bank_name}")
 
@@ -246,8 +254,43 @@ class TransactionParser:
         Returns:
             'paid_in' or 'withdrawn'
         """
-        # Use keyword-based classification (more reliable)
+        # For Halifax: Use transaction type code (FPI, FPO, DD, etc.)
+        if self.config.bank_name.lower() == 'halifax':
+            return self._classify_halifax_by_type_code(line)
+
+        # For other banks: Use keyword-based classification
         return self._classify_amount_by_keywords(description)
+
+    def _classify_halifax_by_type_code(self, line: str) -> str:
+        """
+        Classify Halifax transaction using type code.
+
+        Halifax has explicit type codes:
+        - FPI, PI = money IN
+        - FPO, DD, CHG, DEB, FEE, SO = money OUT
+
+        Args:
+            line: Transaction line containing type code
+
+        Returns:
+            'paid_in' or 'withdrawn'
+        """
+        # Extract type code (2-4 uppercase letters)
+        type_match = re.search(r'\b([A-Z]{2,4})\b', line)
+        if type_match:
+            type_code = type_match.group(1)
+
+            # Money IN codes
+            if type_code in ['FPI', 'PI']:
+                return 'paid_in'
+
+            # Money OUT codes
+            if type_code in ['FPO', 'DD', 'CHG', 'DEB', 'FEE', 'SO']:
+                return 'withdrawn'
+
+        # Default to withdrawn if can't determine
+        logger.warning(f"Could not determine Halifax type code from line: {line[:80]}")
+        return 'withdrawn'
 
     def _classify_amount_by_keywords(self, description: str) -> str:
         """
@@ -323,6 +366,15 @@ class TransactionParser:
         Returns:
             List of parsed transactions
         """
+        # Use bank-specific parsing logic
+        logger.info(f"Parsing with bank: '{self.config.bank_name}'")
+        if self.config.bank_name.lower() == 'halifax':
+            return self._parse_halifax_text(text, statement_start_date, statement_end_date)
+        elif self.config.bank_name.lower() == 'hsbc':
+            logger.info("Routing to HSBC parser")
+            return self._parse_hsbc_text(text, statement_start_date, statement_end_date)
+
+        # Default parsing for NatWest and others
         lines = text.split('\n')
         transactions = []
 
@@ -338,10 +390,23 @@ class TransactionParser:
 
         # Pattern to match lines with amounts (these are transaction lines)
         # Note: Only requires 1+ spaces before amount (not 2+) to catch all transaction lines
-        amount_line_pattern = re.compile(r'.*\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$')
+        # Allow for optional OD (overdrawn), CR (credit), DB (debit) suffixes after amounts
+        amount_line_pattern = re.compile(r'.*\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?(?:\s+(?:OD|CR|DB))?\s*$', re.IGNORECASE)
+
+        # Pattern for table header (to detect column positions dynamically)
+        # Supports both "Description" and "Details", and both column orders
+        header_pattern = re.compile(r'Date\s+(Description|Details).*(Paid In.*Withdrawn|Withdrawn.*Paid In).*Balance', re.IGNORECASE)
+
+        # Dynamic column thresholds (will be updated when we find headers)
+        PAID_IN_THRESHOLD = 73  # Default from first page
+        WITHDRAWN_THRESHOLD = 86
 
         # Track current date (one date applies to multiple transactions in NatWest format)
         current_date_str = None
+
+        # NatWest-specific: Track if we just saw a BROUGHT FORWARD with balance error
+        # If so, we need to calculate balances ourselves instead of trusting PDF
+        recalculate_balances = False
 
         idx = start_idx
         while idx < len(lines):
@@ -355,8 +420,38 @@ class TransactionParser:
                 idx += 1
                 continue
 
+            # Check for table header (update column thresholds dynamically)
+            if header_pattern.search(line):
+                # Extract column positions from header
+                paid_in_match = re.search(r'Paid In', line, re.IGNORECASE)
+                withdrawn_match = re.search(r'Withdrawn', line, re.IGNORECASE)
+                balance_match = re.search(r'Balance', line, re.IGNORECASE)
+
+                if paid_in_match and withdrawn_match and balance_match:
+                    paid_in_start = paid_in_match.start()
+                    withdrawn_start = withdrawn_match.start()
+                    balance_start = balance_match.start()
+
+                    # Calculate thresholds (mid-points between columns)
+                    # Handle both column orders: "Paid In, Withdrawn" or "Withdrawn, Paid In"
+                    if withdrawn_start < paid_in_start:
+                        # Order: Withdrawn, Paid In, Balance
+                        WITHDRAWN_THRESHOLD = (withdrawn_start + paid_in_start) // 2
+                        PAID_IN_THRESHOLD = (paid_in_start + balance_start) // 2
+                    else:
+                        # Order: Paid In, Withdrawn, Balance
+                        PAID_IN_THRESHOLD = (paid_in_start + withdrawn_start) // 2
+                        WITHDRAWN_THRESHOLD = (withdrawn_start + balance_start) // 2
+
+                    logger.debug(f"Updated NatWest column thresholds: Withdrawn={WITHDRAWN_THRESHOLD}, Paid In={PAID_IN_THRESHOLD}")
+
+                idx += 1
+                continue
+
             # Check if this line starts with a date - update current date
-            date_match = re.match(r'^(\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?)', line)
+            # Supports both "18 DEC 2024" (month name) and "16/04/2024" (numeric) formats
+            # Allow optional leading whitespace
+            date_match = re.match(r'^\s*(\d{1,2}/\d{1,2}/\d{4}|\d{1,2}\s+[A-Z]{3}(?:\s+\d{2,4})?)', line, re.IGNORECASE)
             if date_match:
                 current_date_str = date_match.group(1)
                 logger.debug(f"Found date: {current_date_str}")
@@ -375,13 +470,18 @@ class TransactionParser:
                         # Hit blank line, stop
                         break
 
+                    # If previous line is a table header, stop
+                    if header_pattern.search(prev_line):
+                        break
+
                     # If previous line also has amounts, it's another transaction - stop
                     if amount_line_pattern.search(prev_line):
                         break
 
                     # This is a description line - add it
                     # Remove date prefix if present (dates are tracked separately)
-                    desc_line = re.sub(r'^\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?\s*', '', prev_line).strip()
+                    # Supports both "18 DEC 2024" (month name) and "16/04/2024" (numeric) formats
+                    desc_line = re.sub(r'^\s*\d{1,2}/\d{1,2}/\d{4}\s*|^\s*\d{1,2}\s+[A-Z]{3}(?:\s+\d{2,4})?\s*', '', prev_line, flags=re.IGNORECASE).strip()
                     if desc_line:
                         description_lines.insert(0, desc_line)
 
@@ -399,6 +499,75 @@ class TransactionParser:
                     )
 
                     if transaction:
+                        # Skip balance validation for BROUGHT FORWARD transactions (period boundaries)
+                        is_current_bf = 'BROUGHT FORWARD' in transaction.description.upper()
+
+                        # Reset balance recalculation flag at new BROUGHT FORWARD
+                        if is_current_bf:
+                            recalculate_balances = False
+
+                        # NatWest PDF quirk: If we need to recalculate balances (due to cascading errors),
+                        # calculate balance from previous transaction instead of trusting PDF
+                        if recalculate_balances and len(transactions) > 0 and not is_current_bf:
+                            prev_balance = transactions[-1].balance
+                            calculated_balance = prev_balance + transaction.money_in - transaction.money_out
+                            if abs(transaction.balance - calculated_balance) > 0.01:
+                                logger.debug(f"Recalculating balance from {transaction.balance:.2f} to {calculated_balance:.2f} for {transaction.description[:40]}")
+                                transaction.balance = calculated_balance
+
+                        # BALANCE VALIDATION: Auto-correct money_in/money_out direction and balance errors
+                        # This is the self-healing pattern from Halifax/HSBC
+                        # Only validate within periods, not across BROUGHT FORWARD boundaries
+                        if transaction.balance > 0 and len(transactions) > 0 and not is_current_bf:
+                            prev_transaction = transactions[-1]
+                            prev_balance = prev_transaction.balance
+                            balance_change = transaction.balance - prev_balance
+                            calculated_change = transaction.money_in - transaction.money_out
+
+                            # Special case for NatWest: First transaction after BROUGHT FORWARD shows
+                            # the BF balance instead of the actual balance after the transaction.
+                            # Detect this: previous transaction is BROUGHT FORWARD (has no money in/out)
+                            # and current transaction's balance equals the BF balance
+                            is_brought_forward = ((prev_transaction.money_in == 0 or prev_transaction.money_in is None or prev_transaction.money_in != prev_transaction.money_in) and
+                                                (prev_transaction.money_out == 0 or prev_transaction.money_out is None or prev_transaction.money_out != prev_transaction.money_out) and
+                                                'BROUGHT FORWARD' in prev_transaction.description.upper())
+
+                            if is_brought_forward and abs(balance_change) < 0.01 and (transaction.money_in > 0 or transaction.money_out > 0):
+                                # This is the first transaction after BF with balance showing BF amount
+                                # Calculate the correct balance
+                                corrected_balance = prev_balance + transaction.money_in - transaction.money_out
+                                logger.info(
+                                    f"Balance validation: NatWest BF quirk detected. "
+                                    f"Correcting {transaction.description[:30]}... from {transaction.balance:.2f} to {corrected_balance:.2f}"
+                                )
+                                transaction.balance = corrected_balance
+                                balance_change = corrected_balance - prev_balance
+                                calculated_change = transaction.money_in - transaction.money_out
+                                # Enable balance recalculation for subsequent transactions in this period
+                                recalculate_balances = True
+
+                            # If calculated change doesn't match actual balance change, swap direction
+                            if abs(calculated_change - balance_change) > 0.01:
+                                logger.debug(
+                                    f"Balance validation: Swapping direction for {transaction.description[:30]}... "
+                                    f"(calculated: {calculated_change:.2f}, actual: {balance_change:.2f})"
+                                )
+                                # Swap money_in and money_out
+                                transaction.money_in, transaction.money_out = transaction.money_out, transaction.money_in
+
+                                # Recalculate the expected change after swap
+                                calculated_change_after_swap = transaction.money_in - transaction.money_out
+
+                                # If it STILL doesn't match, the PDF balance itself is wrong
+                                # (cascading error from previous transactions)
+                                # Trust our calculated balance instead
+                                if abs(calculated_change_after_swap - balance_change) > 0.01:
+                                    corrected_balance = prev_balance + transaction.money_in - transaction.money_out
+                                    logger.debug(
+                                        f"Balance validation: Correcting balance from {transaction.balance:.2f} to {corrected_balance:.2f}"
+                                    )
+                                    transaction.balance = corrected_balance
+
                         transactions.append(transaction)
                         logger.debug(
                             f"Parsed transaction: {transaction.date} "
@@ -412,6 +581,572 @@ class TransactionParser:
             idx += 1
 
         logger.info(f"Successfully parsed {len(transactions)} transactions")
+        return transactions
+
+    def _parse_halifax_text(
+        self,
+        text: str,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> list[Transaction]:
+        """
+        Parse Halifax statement text with period detection.
+
+        Halifax combined PDFs contain multiple statements. Each statement starts with:
+        - "Page 1 of X" indicator
+        - "Document requested by:" with customer info
+        - Statement period: "01 August 2024 to 31 August 2024"
+        - Opening/closing balance lines (but these are AFTER first transactions!)
+
+        We detect "Page 1 of" to identify statement boundaries and calculate the true
+        opening balance by working backwards from the first transaction.
+
+        Args:
+            text: Extracted text
+            statement_start_date: Statement period start (ignored for combined statements)
+            statement_end_date: Statement period end (ignored for combined statements)
+
+        Returns:
+            List of transactions with BROUGHT FORWARD markers at period boundaries
+        """
+        lines = text.split('\n')
+        transactions = []
+
+        logger.info(f"Parsing Halifax combined statement: {len(lines)} lines")
+
+        # Pattern for page 1 (new statement): "Page 1 of 5"
+        page_one_pattern = re.compile(r'Page 1 of \d+')
+
+        # Pattern for period headers: "01 December 2024 to 31 December 2024"
+        period_pattern = re.compile(
+            r'(\d{2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})\s+to\s+(\d{2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})'
+        )
+
+        # Pattern for Halifax transaction line
+        # Format: Date  Description  Type  [amounts...]  Balance
+        # Capture the full line to preserve column positions
+        transaction_pattern = re.compile(
+            r'^(\d{2}\s+\w+\s+\d{2})\s{2,}(.+?)\s{2,}([A-Z]{2,4})(.+?)(-?[\d,]+\.\d{2})\s*$'
+        )
+
+        current_period_start = None
+        current_period_end = None
+        found_page_one = False
+        first_transaction_in_period = None
+        period_count = 0
+
+        for idx, line in enumerate(lines):
+            # Skip blank lines
+            if not line.strip():
+                continue
+
+            # Check for "Page 1 of X" - indicates new statement period
+            if page_one_pattern.search(line):
+                found_page_one = True
+                first_transaction_in_period = None
+                logger.debug(f"Found 'Page 1 of' at line {idx} - new statement period")
+                continue
+
+            # Check for period header
+            period_match = period_pattern.search(line)
+            if period_match and found_page_one:
+                period_start_str = period_match.group(1)
+                period_end_str = period_match.group(2)
+                current_period_start = parse_date(period_start_str, ["%d %B %Y"])
+                current_period_end = parse_date(period_end_str, ["%d %B %Y"])
+                period_count += 1
+                logger.info(f"Period {period_count}: {period_start_str} to {period_end_str}")
+                found_page_one = False  # Reset flag
+                continue
+
+            # Try to match transaction pattern
+            match = transaction_pattern.search(line)
+            if not match:
+                continue
+
+            try:
+                date_str = match.group(1)  # "01 Aug 24"
+                description = match.group(2).strip()  # "BRITISH GAS"
+                type_code = match.group(3)  # "DD"
+                amounts_text = match.group(4)  # Everything between Type and Balance
+                balance_str = match.group(5)  # "-431.69"
+
+                # Parse date with year inference using current period if available
+                if current_period_start and current_period_end:
+                    transaction_date = infer_year_from_period(
+                        date_str,
+                        current_period_start,
+                        current_period_end
+                    )
+                else:
+                    transaction_date = parse_date(date_str, self.config.date_formats)
+
+                if not transaction_date:
+                    logger.warning(f"Could not parse date: {date_str}")
+                    continue
+
+                # Extract all amounts from the amounts_text region
+                amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+                amounts = amount_pattern.findall(amounts_text)
+
+                balance = parse_currency(balance_str) or 0.0
+
+                # Determine money in/out based on number of amounts and their positions
+                money_in = 0.0
+                money_out = 0.0
+
+                if len(amounts) == 0:
+                    # No transaction amount, only balance (shouldn't happen for normal transactions)
+                    pass
+                elif len(amounts) == 1:
+                    # Single amount - need to determine if it's IN or OUT
+                    amount_val = parse_currency(amounts[0]) or 0.0
+                    amount_pos_in_line = line.find(amounts[0])
+
+                    # HYBRID APPROACH: Use type code + position for better accuracy
+                    # Some Halifax PDFs have inconsistent column alignment between pages
+
+                    # First check if type code gives us a clear answer
+                    if type_code in ['FPI', 'PI', 'BGC', 'DEP']:
+                        # Type codes that are ALWAYS money in
+                        money_in = amount_val
+                    elif type_code in ['FPO', 'DD', 'CHG', 'FEE', 'SO', 'CPT']:
+                        # Type codes that are ALWAYS money out
+                        money_out = amount_val
+                    else:
+                        # Ambiguous type codes (like DEB) - use relative position from balance
+                        # The balance is always the last amount in the line
+                        balance_pos = line.rfind(balance_str)
+                        distance_from_balance = balance_pos - amount_pos_in_line
+
+                        # Money In is typically 50-60 chars before balance
+                        # Money Out is typically 20-30 chars before balance
+                        # Use 40 as threshold
+                        if distance_from_balance > 40:
+                            money_in = amount_val
+                        else:
+                            money_out = amount_val
+                elif len(amounts) == 2:
+                    # Two amounts: first is Money In, second is Money Out
+                    money_in = parse_currency(amounts[0]) or 0.0
+                    money_out = parse_currency(amounts[1]) or 0.0
+                else:
+                    # More than 2 amounts - unexpected, log warning
+                    logger.warning(f"Found {len(amounts)} amounts in line: {line[:80]}")
+                    # Assume first is in, last before balance is out
+                    money_in = parse_currency(amounts[0]) or 0.0
+                    money_out = parse_currency(amounts[-1]) or 0.0
+
+                # VALIDATE DIRECTION: Use balance change as source of truth
+                # If we have a previous transaction, verify the direction makes sense
+                if len(transactions) > 0:
+                    prev_balance = transactions[-1].balance
+                    balance_change = balance - prev_balance
+
+                    # Check if our classification matches the balance change
+                    calculated_change = money_in - money_out
+
+                    if abs(calculated_change - balance_change) > 0.01:
+                        # Direction is wrong! Swap IN and OUT
+                        logger.debug(f"Correcting direction for {description[:30]}: balance change {balance_change:.2f} != calculated {calculated_change:.2f}")
+                        money_in, money_out = money_out, money_in
+
+                # If this is the first transaction in a new period, insert BROUGHT FORWARD
+                if first_transaction_in_period is None and current_period_start:
+                    # Calculate opening balance by working backwards from first transaction
+                    opening_balance = balance - money_in + money_out
+
+                    brought_forward = Transaction(
+                        date=current_period_start,
+                        description="BROUGHT FORWARD",
+                        money_in=0.0,
+                        money_out=0.0,
+                        balance=opening_balance,
+                        transaction_type=None,
+                        confidence=100.0,
+                        raw_text=f"Calculated from first transaction"
+                    )
+                    transactions.append(brought_forward)
+                    logger.debug(f"Added BROUGHT FORWARD: {current_period_start} £{opening_balance:.2f}")
+                    first_transaction_in_period = True
+
+                # Detect transaction type
+                transaction_type = self._detect_transaction_type(description)
+
+                # Calculate confidence
+                confidence = self._calculate_confidence(
+                    date=transaction_date,
+                    description=description,
+                    money_in=money_in,
+                    money_out=money_out,
+                    balance=balance
+                )
+
+                transaction = Transaction(
+                    date=transaction_date,
+                    description=description,
+                    money_in=money_in,
+                    money_out=money_out,
+                    balance=balance,
+                    transaction_type=transaction_type,
+                    confidence=confidence,
+                    raw_text=line[:100]
+                )
+
+                transactions.append(transaction)
+
+            except Exception as e:
+                logger.warning(f"Failed to parse Halifax transaction on line {idx}: {e}")
+                continue
+
+        logger.info(f"Successfully parsed {len(transactions)} Halifax transactions across {period_count} periods")
+        return transactions
+
+    def _parse_hsbc_text(
+        self,
+        text: str,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> list[Transaction]:
+        """
+        Parse HSBC statement text.
+
+        HSBC format combines NatWest and Halifax characteristics:
+        - Date tracking (one date applies to multiple transactions)
+        - Multi-line descriptions
+        - Payment type codes (VIS, CR, ))), DD, SO, BP, ATM, PIM)
+        - "Paid out" and "Paid in" columns
+        - Balance shown intermittently (not after every transaction)
+        - Balance validation to auto-correct direction
+
+        Args:
+            text: Extracted text
+            statement_start_date: Statement period start
+            statement_end_date: Statement period end
+
+        Returns:
+            List of transactions with balance validation
+        """
+        lines = text.split('\n')
+        transactions = []
+
+        logger.info(f"Parsing HSBC statement: {len(lines)} lines")
+        logger.info(f"Statement dates: {statement_start_date} to {statement_end_date}")
+
+        # Pattern for date line: "07 Feb 23" or similar at start of line
+        date_pattern = re.compile(r'^(\d{1,2}\s+\w+\s+\d{2,4})\s+')
+
+        # Pattern for payment type: VIS, CR, ))), DD, SO, BP, ATM, PIM, CHQ, TFR, DR
+        payment_type_pattern = re.compile(r'^\s*(VIS|CR|\)\)\)|DD|SO|BP|ATM|PIM|CHQ|TFR|DR)\s+(.+)$')
+
+        # Pattern for BALANCE BROUGHT/CARRIED FORWARD
+        balance_marker_pattern = re.compile(r'BALANCE\s+(BROUGHT|CARRIED)\s+FORWARD')
+
+        # Pattern for amounts and balance at end of line
+        # Format: description    [paid_out]    [paid_in]    balance
+        amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+
+        # Pattern for table header (to detect column positions)
+        header_pattern = re.compile(r'Paid\s+out.*Paid\s+in.*Balance')
+
+        current_date = None
+        current_payment_type = None
+        description_lines = []
+
+        # Column thresholds (will be updated when header is found)
+        PAID_OUT_THRESHOLD = 64  # Default
+        PAID_IN_THRESHOLD = 90   # Default
+
+        # PRE-SCAN: Find first header to set correct thresholds before processing
+        # This fixes issues where transactions appear before the header in PDF
+        for line in lines:
+            if header_pattern.search(line):
+                paid_out_match = re.search(r'Paid\s+out', line)
+                paid_in_match = re.search(r'Paid\s+in', line)
+                balance_match = re.search(r'Balance', line)
+
+                if paid_out_match and paid_in_match and balance_match:
+                    paid_out_start = paid_out_match.start()
+                    paid_in_start = paid_in_match.start()
+                    balance_start = balance_match.start()
+
+                    # Calculate thresholds (mid-points between columns)
+                    PAID_OUT_THRESHOLD = (paid_out_start + paid_in_start) // 2
+                    PAID_IN_THRESHOLD = (paid_in_start + balance_start) // 2
+
+                    logger.info(f"Pre-scan: Set column thresholds from header: Paid out ≤{PAID_OUT_THRESHOLD}, Paid in ≤{PAID_IN_THRESHOLD}")
+                    break  # Use first header found
+
+        idx = 0
+        amount_lines_found = 0
+        transactions_created = 0
+        while idx < len(lines):
+            line = lines[idx]
+
+            # Skip blank lines
+            if not line.strip():
+                idx += 1
+                continue
+
+            # Check for table header (update column thresholds)
+            if header_pattern.search(line):
+                # Extract column positions from header
+                paid_out_match = re.search(r'Paid\s+out', line)
+                paid_in_match = re.search(r'Paid\s+in', line)
+                balance_match = re.search(r'Balance', line)
+
+                if paid_out_match and paid_in_match and balance_match:
+                    paid_out_start = paid_out_match.start()
+                    paid_in_start = paid_in_match.start()
+                    balance_start = balance_match.start()
+
+                    # Calculate thresholds (mid-points between columns)
+                    PAID_OUT_THRESHOLD = (paid_out_start + paid_in_start) // 2
+                    PAID_IN_THRESHOLD = (paid_in_start + balance_start) // 2
+
+                    logger.debug(f"Updated column thresholds: Paid out ≤{PAID_OUT_THRESHOLD}, Paid in ≤{PAID_IN_THRESHOLD}, Balance >{PAID_IN_THRESHOLD}")
+
+                idx += 1
+                continue
+
+            # Check for BALANCE BROUGHT/CARRIED FORWARD
+            if balance_marker_pattern.search(line):
+                # Extract balance from THIS LINE ONLY (not subsequent lines)
+                amounts = amount_pattern.findall(line)
+                if amounts:
+                    # Take the rightmost amount (balance column)
+                    balance = parse_currency(amounts[-1]) or 0.0
+
+                    # Add BROUGHT FORWARD marker
+                    if 'BROUGHT' in line and current_date:
+                        brought_forward = Transaction(
+                            date=current_date if current_date else statement_start_date,
+                            description="BALANCE BROUGHT FORWARD",
+                            money_in=0.0,
+                            money_out=0.0,
+                            balance=balance,
+                            transaction_type=None,
+                            confidence=100.0,
+                            raw_text=line[:100]
+                        )
+                        transactions.append(brought_forward)
+                        logger.debug(f"Added BROUGHT FORWARD: £{balance:.2f}")
+
+                idx += 1
+                continue
+
+            # Check for new date
+            date_match = date_pattern.search(line)
+            if date_match:
+                current_date_str = date_match.group(1)
+                if statement_start_date and statement_end_date:
+                    current_date = infer_year_from_period(
+                        current_date_str,
+                        statement_start_date,
+                        statement_end_date
+                    )
+                else:
+                    current_date = parse_date(current_date_str, self.config.date_formats)
+
+                logger.debug(f"Found date: {current_date}")
+
+                # Check if this line also has BALANCE BROUGHT FORWARD
+                if balance_marker_pattern.search(line):
+                    amounts = amount_pattern.findall(line)
+                    if amounts:
+                        balance = parse_currency(amounts[-1]) or 0.0
+                        if 'BROUGHT' in line:
+                            brought_forward = Transaction(
+                                date=current_date,
+                                description="BALANCE BROUGHT FORWARD",
+                                money_in=0.0,
+                                money_out=0.0,
+                                balance=balance,
+                                transaction_type=None,
+                                confidence=100.0,
+                                raw_text=line[:100]
+                            )
+                            transactions.append(brought_forward)
+                            logger.debug(f"Added BROUGHT FORWARD: £{balance:.2f}")
+                    idx += 1
+                    continue
+
+                # Rest of line after date might be payment type + description
+                rest_of_line = line[date_match.end():]
+                payment_match_in_date_line = payment_type_pattern.search(rest_of_line)
+                if payment_match_in_date_line:
+                    current_payment_type = payment_match_in_date_line.group(1)
+                    desc_from_payment_line = payment_match_in_date_line.group(2).strip()
+
+                    # Check if this line also has amounts
+                    temp_amounts = []
+                    for match in re.finditer(amount_pattern, line):
+                        temp_amounts.append((match.group(1), match.start()))
+
+                    if temp_amounts:
+                        # Extract description before first amount
+                        first_amt_pos = temp_amounts[0][1]
+                        # Find where description ends (before first amount)
+                        desc_part = desc_from_payment_line
+                        for amt_str, _ in temp_amounts:
+                            if amt_str in desc_part:
+                                desc_part = desc_part[:desc_part.find(amt_str)].strip()
+                                break
+                        description_lines = [desc_part] if desc_part else [desc_from_payment_line]
+                        # Don't continue - fall through to amount processing with payment_match set
+                        payment_match = payment_match_in_date_line
+                    else:
+                        # No amounts on this line
+                        description_lines = [desc_from_payment_line]
+                        idx += 1
+                        continue
+                else:
+                    # Date but no payment type
+                    idx += 1
+                    continue
+
+            # Check for payment type (without date) - only if not already processed above
+            if not date_match:
+                payment_match = payment_type_pattern.search(line)
+            else:
+                payment_match = None
+
+            if payment_match:
+                # New transaction starts
+                current_payment_type = payment_match.group(1)
+                desc_from_payment_line = payment_match.group(2).strip()
+
+                # Extract description part (everything before amounts if any)
+                # Check if this line has amounts
+                temp_amounts = []
+                for match in re.finditer(amount_pattern, line):
+                    temp_amounts.append((match.group(1), match.start()))
+
+                if temp_amounts:
+                    # Payment type line has amounts - extract description before first amount
+                    first_amt_pos = temp_amounts[0][1]
+                    # desc_from_payment_line already has text after payment type, use that
+                    description_lines = [desc_from_payment_line[:desc_from_payment_line.find(temp_amounts[0][0])].strip()]
+                else:
+                    # No amounts on this line
+                    description_lines = [desc_from_payment_line]
+
+            # Check if this line has amounts (indicates end of transaction)
+            amounts_with_pos = []
+            for match in re.finditer(amount_pattern, line):
+                amt_str = match.group(1)
+                pos = match.start()
+                # IMPORTANT: Ignore amounts that appear too far left (in description text)
+                # E.g., "BRL 57.50 @ 7.5360" - the 57.50 is just descriptive, not the actual amount
+                # Real transaction amounts appear in columns starting around position 60+
+                MIN_AMOUNT_POSITION = 50
+                if pos >= MIN_AMOUNT_POSITION:
+                    amounts_with_pos.append((amt_str, pos))
+                else:
+                    logger.debug(f"Ignoring amount {amt_str} at position {pos} (< {MIN_AMOUNT_POSITION}) - likely description text")
+
+            if amounts_with_pos and current_payment_type:
+                amount_lines_found += 1
+                logger.debug(f"Line {idx} has amounts: {amounts_with_pos}, payment_type={current_payment_type}")
+
+                # If this is NOT a payment type line, add description continuation
+                if not payment_match and line.strip():
+                    # Extract description part (everything before first amount)
+                    first_amount_pos = amounts_with_pos[0][1]
+                    desc_part = line[:first_amount_pos].strip()
+                    if desc_part:
+                        description_lines.append(desc_part)
+
+                # This line completes a transaction
+                full_description = ' '.join(description_lines).strip() if description_lines else line.strip()
+
+                # Use column thresholds detected from header
+                # (These are updated when we see a new header line)
+
+                money_in = 0.0
+                money_out = 0.0
+                balance = None
+
+                # Classify amounts by position
+                for amt_str, pos in amounts_with_pos:
+                    amt_val = parse_currency(amt_str) or 0.0
+
+                    if pos <= PAID_OUT_THRESHOLD:
+                        money_out = amt_val
+                    elif pos <= PAID_IN_THRESHOLD:
+                        money_in = amt_val
+                    else:
+                        # Position indicates balance column
+                        balance = amt_val
+
+                # If no balance found on this line, use previous balance
+                if balance is None and transactions:
+                    # Calculate expected balance
+                    prev_balance = transactions[-1].balance
+                    balance = prev_balance + money_in - money_out
+
+                # BALANCE VALIDATION: Auto-correct based on balance change
+                if balance is not None and len(transactions) > 0:
+                    prev_balance = transactions[-1].balance
+                    balance_change = balance - prev_balance
+                    calculated_change = money_in - money_out
+
+                    if abs(calculated_change - balance_change) > 0.01:
+                        # Check if swapping would improve the match
+                        error_before = abs(calculated_change - balance_change)
+                        calculated_after_swap = money_out - money_in
+                        error_after = abs(calculated_after_swap - balance_change)
+
+                        # Only swap if it actually improves things
+                        if error_after < error_before:
+                            logger.debug(f"Correcting HSBC direction for {full_description[:30]}: balance change {balance_change:.2f} != calculated {calculated_change:.2f} (error reduces from {error_before:.2f} to {error_after:.2f})")
+                            money_in, money_out = money_out, money_in
+                        else:
+                            logger.debug(f"HSBC keeping original classification for {full_description[:30]}: swapping would make it worse (error {error_before:.2f} vs {error_after:.2f}), likely PDF rounding error")
+
+                # Create transaction
+                if current_date and full_description and balance is not None:
+                    transaction_type = self._detect_transaction_type(full_description)
+                    confidence = self._calculate_confidence(
+                        date=current_date,
+                        description=full_description,
+                        money_in=money_in,
+                        money_out=money_out,
+                        balance=balance
+                    )
+
+                    transaction = Transaction(
+                        date=current_date,
+                        description=full_description,
+                        money_in=money_in,
+                        money_out=money_out,
+                        balance=balance,
+                        transaction_type=transaction_type,
+                        confidence=confidence,
+                        raw_text=line[:100]
+                    )
+                    transactions.append(transaction)
+                    transactions_created += 1
+                    logger.debug(f"Parsed HSBC: {current_date} {full_description[:20]} In: £{money_in:.2f} Out: £{money_out:.2f} Bal: £{balance:.2f}")
+
+                # Reset for next transaction
+                description_lines = []
+                current_payment_type = None
+
+                idx += 1
+                continue
+
+            # Otherwise, this is a description continuation line
+            if line.strip() and not balance_marker_pattern.search(line):
+                description_lines.append(line.strip())
+
+            idx += 1
+
+        logger.info(f"Successfully parsed {len(transactions)} HSBC transactions")
+        logger.info(f"Debug stats: amount_lines_found={amount_lines_found}, transactions_created={transactions_created}")
+        if len(transactions) == 0:
+            logger.warning("No HSBC transactions found - check parsing logic")
+            logger.debug(f"Final state: current_date={current_date}, current_payment_type={current_payment_type}, description_lines={description_lines}")
         return transactions
 
     def _parse_transaction_from_parts(
@@ -498,9 +1233,22 @@ class TransactionParser:
             else:
                 money_out = transaction_amount
         else:
-            # More than 2 amounts - unclear, use last as balance
+            # More than 2 amounts (e.g., foreign currency with exchange rate and fees)
+            # Pattern: "USD 20.00 VRATE 1.2730 N-S TRN FEE 0.43    16.14    42,193.81"
+            # Last amount = balance, second-to-last = transaction amount
             logger.warning(f"Found {len(amount_matches)} amounts, expected 1 or 2: {line[:80]}")
             balance = parse_currency(amount_matches[-1]) or 0.0
+            transaction_amount = parse_currency(amount_matches[-2]) or 0.0
+
+            # Classify the transaction amount
+            classification = self._classify_amount_by_position(line, amount_matches[-2], full_description)
+            if classification == 'paid_in':
+                money_in = transaction_amount
+            else:
+                money_out = transaction_amount
+
+        # Note: Balance validation is performed in the main parse loop
+        # after this transaction is returned (see parse_text method)
 
         # Detect transaction type
         transaction_type = self._detect_transaction_type(full_description)

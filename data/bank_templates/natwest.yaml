@@ -9,12 +9,21 @@ natwest:
   
   # Statement header fields
   header_patterns:
-    account_name: "Account Name\\s+(.+?)(?=Account No)"
-    account_number: "Account No\\s+(\\d+)"
-    sort_code: "Sort Code\\s+(\\d{2}-\\d{2}-\\d{2})"
+    # Account holder name: handles both formats
+    # Old format: "Account Name...(spaces)...Account No Sort Code\nMRS YAN MA  27104001..."
+    # New format: "MRS CHERYL BIDMEAD" (first line of document, before address)
+    account_name: "Account Name[^\\n]*\\n\\s*([A-Z\\s]+?)(?=\\s{2,}\\d|\\n\\s*REWARD)|^\\s*((?:MRS?|MISS|MS)\\s+[A-Z]+(?:\\s+[A-Z]+){0,2})(?=\\s{5,}|\\n)"
+    # Account number: handles both formats
+    # New format: "Account number:                 84718552"
+    # Old format: "Account No Sort Code Page No\nMRS YAN MA                    27104001   60-12-12"
+    account_number: "Account number:\\s*(\\d+)|Account No Sort Code[^\\n]*\\n[^\\n]*?(\\d{6,10})"
+    # Sort code: handles both formats
+    # New format: "Branch sort code:               601005"
+    # Old format: Numbers after account number "27104001   60-12-12"
+    sort_code: "(?:Branch\\s+)?sort code:\\s*(\\d{6}|\\d{2}[-\\s]\\d{2}[-\\s]\\d{2})|Account No Sort Code[^\\n]*\\n[^\\n]*?(\\d{2}-\\d{2}-\\d{2})"
     statement_date: "Statement Date\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
-    period_start: "Period Covered\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
-    period_end: "to\\s+(\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
+    period_start: "(?i)Period [Cc]overed:?\\s+(?:from\\s+)?(\\d{1,2}/\\d{1,2}/\\d{4}|\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
+    period_end: "(?:to|TO)\\s+(\\d{1,2}/\\d{1,2}/\\d{4}|\\d{1,2}\\s+\\w{3}\\s+\\d{4})"
     previous_balance: "Previous Balance\\s+£([\\d,]+\\.\\d{2})"
     paid_in: "Paid In\\s+£([\\d,]+\\.\\d{2})"
     withdrawn: "Withdrawn\\s+£([\\d,]+\\.\\d{2})"
@@ -23,6 +32,7 @@ natwest:
   
   # Date formats used in this statement
   date_formats:
+    - "%d/%m/%Y"      # "13/03/2024"
     - "%d %b %Y"      # "18 DEC 2024"
     - "%d %b"         # "19 DEC" (year inferred from statement period)
     - "%d %B %Y"      # "18 December 2024"

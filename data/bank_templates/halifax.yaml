@@ -78,6 +78,21 @@ halifax:
       direction: "out"
       keywords: ["SO"]
 
+    cpt:
+      name: "Cashpoint"
+      direction: "out"
+      keywords: ["CPT"]
+
+    bgc:
+      name: "Bank Giro Credit"
+      direction: "in"
+      keywords: ["BGC"]
+
+    dep:
+      name: "Deposit"
+      direction: "in"
+      keywords: ["DEP"]
+
   # Validation rules specific to Halifax
   validation:
     balance_tolerance: 0.01
@@ -94,11 +109,12 @@ halifax:
 
   # Transaction patterns for regex extraction
   transaction_patterns:
-    # Halifax format: Date, Description, Type, Money In, Money Out, Balance in columns
-    # The table has clear column structure with consistent spacing
-    # Pattern matches lines with date at start, followed by amounts at end
+    # Halifax format with pdftotext -layout: Date, Description, Type, Amount, Balance
+    # pdftotext produces cleaner output with 2+ spaces between columns
+    # Pattern: date (2+ spaces) description (2+ spaces) type (2+ spaces) amount (2+ spaces) balance
+    # Example: "02 Dec 24    DAILY OD INT 30/11    CHG    0.44    -454.25"
     standard: |
-      ^(\d{2}\s+\w+\s+\d{2})\s+(.+?)\s+([A-Z]{2,4})\s+(?:([\d,]+\.\d{2}))?\s+(?:([\d,]+\.\d{2}))?\s+(-?[\d,]+\.\d{2})\s*$
+      ^(\d{2}\s+\w+\s+\d{2})\s{2,}(.+?)\s{2,}([A-Z]{2,4})\s{2,}([\d,]+\.\d{2})\s{2,}(-?[\d,]+\.\d{2})\s*$
 
 # Notes for parser implementation:
 # 1. Halifax uses tabular format with clear columns

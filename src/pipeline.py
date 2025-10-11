@@ -12,6 +12,7 @@ from datetime import datetime
 
 from .models import ExtractionResult, Statement
 from .extractors import PDFExtractor
+from .extractors.pdftotext_extractor import PDFToTextExtractor
 from .parsers import TransactionParser
 from .validators import BalanceValidator
 from .exporters import ExcelExporter, generate_output_filename
@@ -26,7 +27,7 @@ class ExtractionPipeline:
     Main pipeline for bank statement extraction (ETL pattern).
 
     Phases:
-    1. Extract - Get text from PDF/image
+    1. Extract - Get text from PDF/image (tries pdfplumber, falls back to pdftotext)
     2. Transform - Parse transactions, validate balances
     3. Load - Export to Excel
 
@@ -36,6 +37,7 @@ class ExtractionPipeline:
     def __init__(self):
         """Initialize pipeline with extractors and parsers."""
         self.pdf_extractor = PDFExtractor()
+        self.pdftotext_extractor = PDFToTextExtractor()
         self.bank_config_loader = get_bank_config_loader()
         self.validator = BalanceValidator(tolerance=0.01)
         self.exporter = ExcelExporter()
@@ -182,9 +184,10 @@ class ExtractionPipeline:
         Extract text from file using cascading strategies.
 
         Strategy order:
-        1. PDF text extraction (fast, cheap)
-        2. OCR (medium speed/cost) - TODO
-        3. Vision API (slow, expensive) - TODO
+        1. PDF text extraction with pdfplumber (fast, good for most PDFs)
+        2. PDF text extraction with pdftotext (fallback for problematic PDFs like Halifax)
+        3. OCR (medium speed/cost) - TODO
+        4. Vision API (slow, expensive) - TODO
 
         Args:
             file_path: Path to statement file
@@ -196,13 +199,53 @@ class ExtractionPipeline:
 
         # Try PDF text extraction
         if file_path.suffix.lower() == '.pdf':
+            # Check if this is Halifax, HSBC, or NatWest - use pdftotext for layout preservation
+            # (Halifax PDFs have font issues, HSBC/NatWest need precise column positions)
+            try:
+                # Quick peek to detect bank
+                text_sample, _ = self.pdf_extractor.extract(file_path)
+                if text_sample:
+                    bank_detected = None
+                    text_lower = text_sample.lower()
+
+                    if 'halifax' in text_lower:
+                        bank_detected = 'Halifax'
+                    elif 'hsbc' in text_lower:
+                        bank_detected = 'HSBC'
+                    elif 'natwest' in text_lower or 'national westminster' in text_lower:
+                        bank_detected = 'NatWest'
+
+                    if bank_detected:
+                        logger.info(f"Detected {bank_detected} statement - using pdftotext for layout preservation")
+                        text, confidence = self.pdftotext_extractor.extract(file_path)
+                        if text:
+                            logger.info(f"✓ pdftotext extraction successful")
+                            return text, confidence, "pdftotext"
+            except Exception:
+                pass  # Continue to normal extraction flow
+
+            # Try pdfplumber first (works well for most PDFs)
             try:
                 text, confidence = self.pdf_extractor.extract(file_path)
                 if text and confidence > 80:
                     logger.info(f"✓ PDF extraction successful (confidence: {confidence:.1f}%)")
-                    return text, confidence, "pdf_text"
+                    return text, confidence, "pdfplumber"
+                elif text:
+                    logger.warning(f"pdfplumber produced low-confidence text ({confidence:.1f}%), trying pdftotext...")
             except Exception as e:
-                logger.warning(f"PDF extraction failed: {e}")
+                logger.warning(f"pdfplumber extraction failed: {e}, trying pdftotext...")
+
+            # Try pdftotext as fallback (better for some PDFs with font issues)
+            try:
+                text, confidence = self.pdftotext_extractor.extract(file_path)
+                if text:
+                    logger.info(f"✓ pdftotext extraction successful")
+                    return text, confidence, "pdftotext"
+            except RuntimeError as e:
+                # pdftotext not installed
+                logger.warning(f"pdftotext not available: {e}")
+            except Exception as e:
+                logger.warning(f"pdftotext extraction failed: {e}")
 
         # TODO: Try OCR for scanned PDFs/images
         # TODO: Try Vision API as fallback
@@ -271,15 +314,26 @@ class ExtractionPipeline:
         # Extract fields using patterns
         extracted = {}
         for field_name, pattern in header_patterns.items():
-            match = re.search(pattern, text)
+            match = re.search(pattern, text, re.MULTILINE)
             if match:
-                extracted[field_name] = match.group(1) if match.groups() else match.group(0)
+                # Handle patterns with multiple capture groups (from alternation)
+                # Get the first non-None group
+                value = None
+                if match.groups():
+                    for group in match.groups():
+                        if group is not None:
+                            value = group
+                            break
+                if value is None:
+                    value = match.group(0)
+                extracted[field_name] = value
                 logger.debug(f"Found {field_name}: {extracted[field_name]}")
 
         # Parse required fields
         try:
             # Account info
             account_number = extracted.get('account_number', 'Unknown')
+            account_holder = extracted.get('account_name')  # Note: YAML uses 'account_name' key
             sort_code = extracted.get('sort_code')
 
             # Dates
@@ -290,11 +344,24 @@ class ExtractionPipeline:
                 logger.error("Missing statement period dates")
                 return None
 
-            statement_start = parse_date(period_start_str, bank_config.date_formats)
+            # Parse end date first (it has the year)
             statement_end = parse_date(period_end_str, bank_config.date_formats)
+            if not statement_end:
+                logger.error("Could not parse statement end date")
+                return None
 
-            if not statement_start or not statement_end:
-                logger.error("Could not parse statement dates")
+            # For HSBC: if start date doesn't have year, add it from end date
+            if bank_config.bank_name.lower() == 'hsbc':
+                # Check if period_start_str has a 4-digit year
+                import re
+                if not re.search(r'\d{4}', period_start_str):
+                    # Add year from end date
+                    period_start_str = f"{period_start_str} {statement_end.year}"
+                    logger.debug(f"Added year to HSBC period_start: {period_start_str}")
+
+            statement_start = parse_date(period_start_str, bank_config.date_formats)
+            if not statement_start:
+                logger.error("Could not parse statement start date")
                 return None
 
             # Balances
@@ -308,6 +375,7 @@ class ExtractionPipeline:
             statement = Statement(
                 bank_name=bank_config.bank_name,
                 account_number=account_number,
+                account_holder=account_holder,
                 statement_start_date=statement_start,
                 statement_end_date=statement_end,
                 opening_balance=opening_balance,
@@ -317,6 +385,7 @@ class ExtractionPipeline:
             )
 
             logger.info(f"✓ Metadata extracted: {account_number}, {statement_start.date()} to {statement_end.date()}")
+            logger.debug(f"Account holder: '{account_holder}', Sort code: '{sort_code}'")
             return statement
 
         except Exception as e:
