@@ -275,7 +275,7 @@ class BalanceValidator:
 
         Validates:
         1. Individual transaction balances
-        2. Statement opening/closing totals
+        2. Statement opening/closing totals (skipped for combined statements)
 
         Args:
             statement: Statement metadata
@@ -299,10 +299,32 @@ class BalanceValidator:
             all_passed = False
 
         # 2. Validate statement totals
-        total_result = self.validate_statement_totals(statement, transactions)
-        results.append(total_result.message)
-        if not total_result.success:
-            all_passed = False
+        # Skip for combined statements (multiple periods in one PDF)
+        # Detected by either:
+        # - Multiple BROUGHT FORWARD markers (Halifax, HSBC)
+        # - Opening and closing balances both £0.00 (Barclays)
+        brought_forward_count = sum(
+            1 for txn in transactions
+            if 'BROUGHT FORWARD' in txn.description.upper()
+        )
+
+        is_combined = (
+            brought_forward_count > 1 or
+            (statement.opening_balance == 0.0 and statement.closing_balance == 0.0)
+        )
+
+        if is_combined:
+            logger.info(
+                f"Skipping statement totals validation for combined statement "
+                f"(BROUGHT FORWARD markers: {brought_forward_count}, "
+                f"opening: £{statement.opening_balance:.2f}, "
+                f"closing: £{statement.closing_balance:.2f})"
+            )
+        else:
+            total_result = self.validate_statement_totals(statement, transactions)
+            results.append(total_result.message)
+            if not total_result.success:
+                all_passed = False
 
         if all_passed:
             logger.info("✓ Safety check PASSED")

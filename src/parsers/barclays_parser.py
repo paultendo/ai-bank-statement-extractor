@@ -245,10 +245,11 @@ class BarclaysParser(BaseTransactionParser):
         full_description = re.sub(r'^\s*\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?\s*', '', full_description, flags=re.IGNORECASE)
         full_description = ' '.join(full_description.split())  # Normalize whitespace
 
-        # Skip "Start balance" transactions
+        # "Start balance" transactions: rename to BROUGHT FORWARD for consistency
+        # These mark the start of each statement period (like Halifax/HSBC)
         if "Start balance" in full_description:
-            logger.debug(f"Skipping 'Start balance' line")
-            return None
+            full_description = "BROUGHT FORWARD"
+            logger.debug(f"Found Start balance (renamed to BROUGHT FORWARD)")
 
         # Classify amounts by position
         # Strategy: Rightmost amount is ALWAYS balance. Other amounts are transaction amounts.
