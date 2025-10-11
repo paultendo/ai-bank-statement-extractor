@@ -158,6 +158,11 @@ class TransactionParser:
             self.transaction_pattern
         )
 
+        # Column positions for debit/credit classification (Monopoly pattern)
+        self.paid_in_pos = None
+        self.withdrawn_pos = None
+        self.header_line_idx = None
+
     def _compile_pattern(self) -> re.Pattern:
         """Compile transaction regex pattern from config."""
         pattern_dict = self.config.transaction_patterns
@@ -174,6 +179,110 @@ class TransactionParser:
             return re.compile(pattern_str, re.VERBOSE | re.MULTILINE)
         except re.error as e:
             raise ValueError(f"Invalid regex pattern for {self.config.bank_name}: {e}")
+
+    def _find_table_header(self, lines: list[str]) -> Optional[int]:
+        """
+        Find the table header line index.
+
+        Looks for line containing column headers like "Date Description Paid In"
+
+        Args:
+            lines: All lines from statement
+
+        Returns:
+            Line index of header, or None if not found
+        """
+        header_patterns = [
+            r'Date\s+Description\s+Paid\s+In.*Withdrawn.*Balance',
+            r'Date\s+Description.*Paid.*Withdrawn.*Balance',
+            r'Date.*Description.*Money\s+In.*Money\s+Out',
+        ]
+
+        for idx, line in enumerate(lines):
+            for pattern in header_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    logger.debug(f"Found table header at line {idx}: {line[:80]}")
+                    return idx
+
+        logger.warning("Table header not found")
+        return None
+
+    def _extract_column_positions(self, header_line: str):
+        """
+        Extract column positions from header line (Monopoly pattern).
+
+        Args:
+            header_line: The header line containing column names
+        """
+        # Find "Paid In" position (end of column name)
+        paid_in_match = re.search(r'Paid\s+In\s*\(\s*£\s*\)', header_line, re.IGNORECASE)
+        if paid_in_match:
+            # Right-aligned: use end position
+            self.paid_in_pos = paid_in_match.end()
+            logger.debug(f"Paid In column ends at position {self.paid_in_pos}")
+
+        # Find "Withdrawn" position (end of column name)
+        withdrawn_match = re.search(r'Withdrawn\s*\(\s*£\s*\)', header_line, re.IGNORECASE)
+        if withdrawn_match:
+            # Right-aligned: use end position
+            self.withdrawn_pos = withdrawn_match.end()
+            logger.debug(f"Withdrawn column ends at position {self.withdrawn_pos}")
+
+        if not self.paid_in_pos or not self.withdrawn_pos:
+            logger.warning("Could not extract column positions from header")
+
+    def _classify_amount_by_position(self, line: str, amount_str: str, description: str) -> str:
+        """
+        Classify amount as paid_in or withdrawn.
+
+        Uses keyword-based classification (more reliable with pdfplumber).
+        Column position approach doesn't work well because pdfplumber doesn't preserve exact spacing.
+
+        Args:
+            line: The line containing the amount
+            amount_str: The amount string to classify
+            description: Full transaction description
+
+        Returns:
+            'paid_in' or 'withdrawn'
+        """
+        # Use keyword-based classification (more reliable)
+        return self._classify_amount_by_keywords(description)
+
+    def _classify_amount_by_keywords(self, description: str) -> str:
+        """
+        Fallback: Classify amount based on keywords in description.
+
+        For NatWest statements:
+        - "Automated Credit" = money IN
+        - "OnLine Transaction", "Card Transaction", "Direct Debit" = money OUT
+        - Default = money OUT
+
+        Args:
+            description: Transaction description
+
+        Returns:
+            'paid_in' or 'withdrawn'
+        """
+        description_lower = description.lower()
+
+        # Money IN indicators (specific to UK banking)
+        money_in_keywords = [
+            'automated credit',  # NatWest specific
+            'credit',
+            'paid in',
+            'deposit',
+            'salary',
+            'refund',
+            'cashback',
+            'interest',
+        ]
+
+        if any(keyword in description_lower for keyword in money_in_keywords):
+            return 'paid_in'
+        else:
+            # Everything else is withdrawn (card payments, online transactions, direct debits, etc.)
+            return 'withdrawn'
 
     def parse_text(
         self,
@@ -197,14 +306,71 @@ class TransactionParser:
 
         logger.info(f"Parsing {len(lines)} lines for transactions")
 
-        for line_idx, line in enumerate(lines):
-            if match := self.transaction_pattern.search(line):
+        # Find table header and extract column positions (Monopoly pattern)
+        self.header_line_idx = self._find_table_header(lines)
+        if self.header_line_idx is not None:
+            self._extract_column_positions(lines[self.header_line_idx])
+
+        # Only process lines after the header
+        start_idx = (self.header_line_idx + 1) if self.header_line_idx is not None else 0
+
+        # Pattern to match lines with amounts (these are transaction lines)
+        amount_line_pattern = re.compile(r'.*\s{2,}([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$')
+
+        # Track current date (one date applies to multiple transactions in NatWest format)
+        current_date_str = None
+
+        idx = start_idx
+        while idx < len(lines):
+            line = lines[idx]
+
+            # Skip blank lines and footer lines
+            if not line.strip():
+                idx += 1
+                continue
+            if re.search(r'National Westminster Bank|Registered|Authorised|RETSTMT', line, re.IGNORECASE):
+                idx += 1
+                continue
+
+            # Check if this line starts with a date - update current date
+            date_match = re.match(r'^(\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?)', line)
+            if date_match:
+                current_date_str = date_match.group(1)
+                logger.debug(f"Found date: {current_date_str}")
+
+            # Check if this line has amounts (is a transaction line)
+            if amount_match := amount_line_pattern.search(line):
+                # This line has amounts - it's a transaction line
+                # Look backwards to collect description lines (up to previous amount line)
+                description_lines = []
+
+                # Look backwards for description (up to 5 lines, stop at blank or another amount line)
+                for lookback_idx in range(idx - 1, max(start_idx, idx - 6), -1):
+                    prev_line = lines[lookback_idx]
+
+                    if not prev_line.strip():
+                        # Hit blank line, stop
+                        break
+
+                    # If previous line also has amounts, it's another transaction - stop
+                    if amount_line_pattern.search(prev_line):
+                        break
+
+                    # This is a description line - add it
+                    # Remove date prefix if present (dates are tracked separately)
+                    desc_line = re.sub(r'^\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?\s*', '', prev_line).strip()
+                    if desc_line:
+                        description_lines.insert(0, desc_line)
+
+                # Combine description lines
+                full_description = ' '.join(description_lines) if description_lines else ''
+
+                # Parse the transaction
                 try:
-                    transaction = self._parse_transaction(
-                        match=match,
+                    transaction = self._parse_transaction_from_parts(
                         line=line,
-                        line_index=line_idx,
-                        all_lines=lines,
+                        description=full_description,
+                        date_str=current_date_str,
                         statement_start_date=statement_start_date,
                         statement_end_date=statement_end_date
                     )
@@ -218,11 +384,123 @@ class TransactionParser:
                         )
 
                 except Exception as e:
-                    logger.warning(f"Failed to parse transaction on line {line_idx}: {e}")
-                    continue
+                    logger.warning(f"Failed to parse transaction on line {idx}: {e}")
+
+            idx += 1
 
         logger.info(f"Successfully parsed {len(transactions)} transactions")
         return transactions
+
+    def _parse_transaction_from_parts(
+        self,
+        line: str,
+        description: str,
+        date_str: Optional[str],
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> Optional[Transaction]:
+        """
+        Parse transaction from separated parts.
+
+        Args:
+            line: Line containing amounts
+            description: Combined description from previous lines
+            date_str: Date string (if found)
+            statement_start_date: Statement period start
+            statement_end_date: Statement period end
+
+        Returns:
+            Transaction object or None
+        """
+        # Extract amounts from the line
+        amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+        amount_matches = amount_pattern.findall(line)
+
+        if not amount_matches:
+            logger.warning(f"No amounts found in line: {line[:80]}")
+            return None
+
+        # Parse date
+        if not date_str:
+            logger.warning(f"No date found for transaction: {description[:50]}")
+            return None
+
+        if statement_start_date and statement_end_date:
+            transaction_date = infer_year_from_period(
+                date_str,
+                statement_start_date,
+                statement_end_date
+            )
+        else:
+            transaction_date = parse_date(date_str, self.config.date_formats)
+
+        if not transaction_date:
+            logger.warning(f"Could not parse date: {date_str}")
+            return None
+
+        # Build full description (combine with any description text on the amount line)
+        line_desc_match = re.match(r'(.+?)\s{2,}[\d,]+\.\d{2}', line)
+        if line_desc_match:
+            line_desc = line_desc_match.group(1).strip()
+            # Remove date from line description if present
+            line_desc = re.sub(r'^\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?\s*', '', line_desc)
+            if line_desc:
+                full_description = f"{description} {line_desc}".strip() if description else line_desc
+            else:
+                full_description = description
+        else:
+            full_description = description
+
+        if not full_description:
+            logger.warning(f"No description found for transaction on line: {line[:80]}")
+            return None
+
+        # Parse amounts based on how many we found
+        money_in = 0.0
+        money_out = 0.0
+        balance = 0.0
+
+        if len(amount_matches) == 1:
+            # Single amount = balance only (BROUGHT FORWARD, etc.)
+            balance = parse_currency(amount_matches[0]) or 0.0
+        elif len(amount_matches) == 2:
+            # Two amounts: transaction + balance
+            transaction_amount = parse_currency(amount_matches[0]) or 0.0
+            balance = parse_currency(amount_matches[1]) or 0.0
+
+            # Classify using keywords from description
+            classification = self._classify_amount_by_position(line, amount_matches[0], full_description)
+            if classification == 'paid_in':
+                money_in = transaction_amount
+            else:
+                money_out = transaction_amount
+        else:
+            # More than 2 amounts - unclear, use last as balance
+            logger.warning(f"Found {len(amount_matches)} amounts, expected 1 or 2: {line[:80]}")
+            balance = parse_currency(amount_matches[-1]) or 0.0
+
+        # Detect transaction type
+        transaction_type = self._detect_transaction_type(full_description)
+
+        # Calculate confidence
+        confidence = self._calculate_confidence(
+            date=transaction_date,
+            description=full_description,
+            money_in=money_in,
+            money_out=money_out,
+            balance=balance
+        )
+
+        return Transaction(
+            date=transaction_date,
+            description=full_description,
+            money_in=money_in,
+            money_out=money_out,
+            balance=balance,
+            transaction_type=transaction_type,
+            confidence=confidence,
+            raw_text=line[:100]
+        )
 
     def _parse_transaction(
         self,
@@ -250,10 +528,22 @@ class TransactionParser:
         groups = match.groupdict()
         field_mapping = self.config.field_mapping
 
-        # Extract date
+        # Extract date - if not in this line, look backwards
         date_str = groups.get('date', '')
         if not date_str:
-            logger.warning("No date found in transaction")
+            # NatWest format: date might be on previous line(s)
+            # Look backwards for a date pattern
+            import re
+            for prev_idx in range(max(0, line_index - 5), line_index):
+                prev_line = all_lines[prev_idx]
+                date_match = re.search(r'(\d{1,2}\s+[A-Z]{3}(?:\s+\d{4})?)', prev_line)
+                if date_match:
+                    date_str = date_match.group(1)
+                    logger.debug(f"Found date on previous line {prev_idx}: {date_str}")
+                    break
+
+        if not date_str:
+            logger.warning("No date found in transaction or previous lines")
             return None
 
         # Parse date with year inference
@@ -276,40 +566,63 @@ class TransactionParser:
             logger.warning("No description found in transaction")
             return None
 
-        # Check if multi-line description
-        description_pos = line.find(description)
-        if description_pos >= 0 and line_index < len(all_lines) - 1:
-            description = self.multiline_extractor.get_multiline_description(
-                initial_description=description,
-                line_index=line_index,
-                all_lines=all_lines,
-                description_position=description_pos,
-                description_margin=3
-            )
+        # For NatWest: if description looks like a reference number, get real description from previous line
+        if description and re.match(r'^[A-Z0-9\s\-\*]+$', description) and len(description) < 50:
+            # Look back for actual description
+            for prev_idx in range(max(0, line_index - 3), line_index):
+                prev_line = all_lines[prev_idx].strip()
+                if prev_line and not re.match(r'^\s*[\d,]+\.\d{2}\s', prev_line):
+                    # This looks like a description line, not an amount line
+                    # Append current line as reference
+                    full_desc = prev_line + " " + description
+                    description = full_desc.strip()
+                    logger.debug(f"Combined description from line {prev_idx}: {description[:50]}...")
+                    break
 
         # Extract amounts using field mapping
         money_in = 0.0
         money_out = 0.0
         balance = 0.0
 
-        # Map bank-specific field names to our standard names
-        paid_in_field = next(
-            (k for k, v in field_mapping.items() if v == 'money_in'),
-            'paid_in'
-        )
-        withdrawn_field = next(
-            (k for k, v in field_mapping.items() if v == 'money_out'),
-            'withdrawn'
-        )
+        # Get balance (might be None for single-amount lines)
+        balance_str = groups.get('balance')
+        amount_str = groups.get('amount')
 
-        if paid_in_str := groups.get(paid_in_field):
-            money_in = parse_currency(paid_in_str) or 0.0
-
-        if withdrawn_str := groups.get(withdrawn_field):
-            money_out = parse_currency(withdrawn_str) or 0.0
-
-        if balance_str := groups.get('balance'):
+        # NatWest special case: if balance is None, amount IS the balance (BROUGHT FORWARD, etc.)
+        if amount_str and not balance_str:
+            # Single amount line - it's the balance only
+            balance = parse_currency(amount_str) or 0.0
+            # No transaction amount (money_in and money_out stay 0)
+        elif amount_str and balance_str:
+            # Two amounts: first is transaction, second is balance
+            amount = parse_currency(amount_str) or 0.0
             balance = parse_currency(balance_str) or 0.0
+
+            # Classify using column position (Monopoly pattern)
+            classification = self._classify_amount_by_position(line, amount_str)
+            if classification == 'paid_in':
+                money_in = amount
+            else:
+                money_out = amount
+        elif balance_str:
+            # Only balance provided
+            balance = parse_currency(balance_str) or 0.0
+        else:
+            # Standard format with separate paid_in/withdrawn fields
+            paid_in_field = next(
+                (k for k, v in field_mapping.items() if v == 'money_in'),
+                'paid_in'
+            )
+            withdrawn_field = next(
+                (k for k, v in field_mapping.items() if v == 'money_out'),
+                'withdrawn'
+            )
+
+            if paid_in_str := groups.get(paid_in_field):
+                money_in = parse_currency(paid_in_str) or 0.0
+
+            if withdrawn_str := groups.get(withdrawn_field):
+                money_out = parse_currency(withdrawn_str) or 0.0
 
         # Detect transaction type
         transaction_type = self._detect_transaction_type(description)
