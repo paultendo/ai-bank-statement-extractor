@@ -92,6 +92,8 @@ class BarclaysParser(BaseTransactionParser):
         balance_start = balance_match.start()
 
         # Calculate thresholds (midpoints between columns)
+        # NOTE: Amounts are right-aligned, so we need to account for this
+        # Use midpoint as threshold, but check amount START position (not end)
         MONEY_OUT_THRESHOLD = (money_out_start + money_in_start) // 2
         MONEY_IN_THRESHOLD = (money_in_start + balance_start) // 2
 
@@ -123,6 +125,11 @@ class BarclaysParser(BaseTransactionParser):
             if not line.strip():
                 continue
 
+            # Skip summary section "Start balance" lines (these don't have dates at the start)
+            # e.g., "    IP27 0LU                                                                                                                Start balance             £512.97"
+            if "Start balance" in line and not re.match(r'^\d{1,2}\s+[A-Z][a-z]{2}', line):
+                continue
+
             # Check if this line has a date
             date_match = date_pattern.match(line)
 
@@ -130,11 +137,17 @@ class BarclaysParser(BaseTransactionParser):
             is_transaction_start = transaction_start_pattern.search(line)
 
             # Check if this line has amounts
+            # IMPORTANT: Ignore amounts in description text (position < 50)
+            # E.g., "National Lottery I 10.00 On 12 Dec" has 10.00 in description
             amounts_with_pos = []
+            MIN_AMOUNT_POSITION = 50
             for match in amount_pattern.finditer(line):
                 amt_str = match.group(1)
                 pos = match.start()
-                amounts_with_pos.append((amt_str, pos))
+                if pos >= MIN_AMOUNT_POSITION:
+                    amounts_with_pos.append((amt_str, pos))
+                else:
+                    logger.debug(f"Ignoring amount {amt_str} at position {pos} (< {MIN_AMOUNT_POSITION}) - likely description text")
 
             # If we see a new transaction description starting, complete the previous one
             if is_transaction_start and current_description_lines:
@@ -280,14 +293,27 @@ class BarclaysParser(BaseTransactionParser):
             return None
 
         # Build description from all lines
-        full_description = ' '.join(description_lines)
+        # First, remove amounts from description lines (amounts are captured separately)
+        clean_description_lines = []
+        amount_pattern_for_removal = re.compile(r'([£]?[\d,]+\.\d{2})')
+        for line in description_lines:
+            # Remove amounts that appear after position 50 (column amounts, not description text)
+            clean_line = line
+            for match in amount_pattern_for_removal.finditer(line):
+                if match.start() >= 50:
+                    # Replace amount with spaces to preserve column structure
+                    clean_line = clean_line[:match.start()] + ' ' * len(match.group(0)) + clean_line[match.end():]
+            clean_description_lines.append(clean_line)
+
+        full_description = ' '.join(clean_description_lines)
         # Remove date from description
         full_description = re.sub(r'^\s*\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?\s*', '', full_description, flags=re.IGNORECASE)
         full_description = ' '.join(full_description.split())  # Normalize whitespace
 
         # "Start balance" transactions: rename to BROUGHT FORWARD for consistency
         # These mark the start of each statement period (like Halifax/HSBC)
-        if "Start balance" in full_description:
+        is_brought_forward = "Start balance" in full_description
+        if is_brought_forward:
             full_description = "BROUGHT FORWARD"
             logger.debug(f"Found Start balance (renamed to BROUGHT FORWARD)")
 
@@ -297,21 +323,39 @@ class BarclaysParser(BaseTransactionParser):
         money_in = 0.0
         balance = 0.0
 
-        if not amounts_with_pos:
+        # Special handling for BROUGHT FORWARD: amount is always the opening balance
+        if is_brought_forward and len(amounts_with_pos) == 1:
+            amt_str, _ = amounts_with_pos[0]
+            balance = parse_currency(amt_str) or 0.0
+            money_in = 0.0
+            money_out = 0.0
+        elif not amounts_with_pos:
             logger.warning(f"No amounts found for Barclays transaction: {full_description[:50]}")
         elif len(amounts_with_pos) == 1:
-            # Single amount - check position to determine if it's balance or transaction amount
+            # Single amount - determine which column by checking distance to column starts
             amt_str, pos = amounts_with_pos[0]
             amt = parse_currency(amt_str) or 0.0
 
-            # If in balance column (rightmost), it's a balance
-            if pos >= money_in_threshold:
+            # Calculate distances to each column start (amounts are right-aligned)
+            # Use the END position of the amount for better accuracy
+            amt_end = pos + len(amt_str)
+
+            # Distances from amount END to each column END (approximate)
+            # Money out column ends around position 82 (before Money in at 85)
+            # Money in column ends around position 102 (before Balance at 105)
+            # Balance column ends around position 125
+            dist_to_money_out = abs(amt_end - 82)
+            dist_to_money_in = abs(amt_end - 102)
+            dist_to_balance = abs(amt_end - 125)
+
+            # Classify based on closest column
+            min_dist = min(dist_to_money_out, dist_to_money_in, dist_to_balance)
+
+            if min_dist == dist_to_balance:
                 balance = amt
-            # If in money_in column, it's money in (no balance shown)
-            elif pos >= money_out_threshold:
+            elif min_dist == dist_to_money_in:
                 money_in = amt
                 balance = 0.0  # Will be calculated later
-            # If in money_out column, it's money out (no balance shown)
             else:
                 money_out = amt
                 balance = 0.0  # Will be calculated later
@@ -321,17 +365,22 @@ class BarclaysParser(BaseTransactionParser):
             sorted_amounts = sorted(amounts_with_pos, key=lambda x: x[1])
 
             # Rightmost = balance
-            balance_str, _ = sorted_amounts[-1]
+            balance_str, balance_pos = sorted_amounts[-1]
             balance = parse_currency(balance_str) or 0.0
 
-            # Classify remaining amounts by their column position
+            # Classify remaining amounts by their column position using distance method
             for amt_str, pos in sorted_amounts[:-1]:
                 amt = parse_currency(amt_str) or 0.0
+                amt_end = pos + len(amt_str)
 
-                # Middle column = money in
-                if pos >= money_out_threshold:
+                # Calculate distances to column ends
+                dist_to_money_out = abs(amt_end - 82)
+                dist_to_money_in = abs(amt_end - 102)
+
+                # Classify based on closest column (balance already handled)
+                # In case of tie, prefer money_in (as it's to the right)
+                if dist_to_money_in <= dist_to_money_out:
                     money_in += amt  # Sum if multiple amounts in same column
-                # Left column = money out
                 else:
                     money_out += amt
 
