@@ -199,8 +199,8 @@ class ExtractionPipeline:
 
         # Try PDF text extraction
         if file_path.suffix.lower() == '.pdf':
-            # Check if this is Halifax, HSBC, or NatWest - use pdftotext for layout preservation
-            # (Halifax PDFs have font issues, HSBC/NatWest need precise column positions)
+            # Check if this is Halifax, HSBC, NatWest, or Barclays - use pdftotext for layout preservation
+            # (Halifax PDFs have font issues, HSBC/NatWest/Barclays need precise column positions)
             try:
                 # Quick peek to detect bank
                 text_sample, _ = self.pdf_extractor.extract(file_path)
@@ -214,6 +214,8 @@ class ExtractionPipeline:
                         bank_detected = 'HSBC'
                     elif 'natwest' in text_lower or 'national westminster' in text_lower:
                         bank_detected = 'NatWest'
+                    elif 'barclays' in text_lower:
+                        bank_detected = 'Barclays'
 
                     if bank_detected:
                         logger.info(f"Detected {bank_detected} statement - using pdftotext for layout preservation")
