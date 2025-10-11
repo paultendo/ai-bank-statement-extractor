@@ -232,7 +232,6 @@ class BarclaysParser(BaseTransactionParser):
                     # Valid continuation patterns
                     valid_continuation_patterns = [
                         r'^\s{10,}On \d{1,2} [A-Z][a-z]{2}',  # "On XX Xxx" date reference
-                        r'^\s{10,}\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?$',  # "12 Dec" or "12 Dec 2023" (bare date for Refund From)
                         r'^\s{10,}Ref:',  # "Ref: XXX" reference
                         r'^\s{10,}Account \d+',  # "Account XXXXXXXX" account number
                         r'^\s{10,}Timed at',  # "Timed at XX.XX" for cash machine withdrawals
@@ -244,15 +243,20 @@ class BarclaysParser(BaseTransactionParser):
                             is_valid_continuation = True
                             break
 
-                    if is_valid_continuation:
-                        # Special case: bare date line (e.g., "12 Dec") updates the transaction date
-                        # This happens with "Refund From" transactions where date is on second line
-                        bare_date_match = re.match(r'^\s{10,}(\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?)$', line, re.IGNORECASE)
-                        if bare_date_match:
-                            # Update the current transaction's date
+                    # Special case: bare date line (e.g., "12 Dec") for Refund From transactions
+                    # Only treat as continuation if current transaction is Refund From
+                    bare_date_match = re.match(r'^\s{10,}(\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?)$', line, re.IGNORECASE)
+                    if bare_date_match and current_description_lines:
+                        first_line = current_description_lines[0]
+                        if 'Refund From' in first_line:
+                            # This is the date for the Refund From transaction
                             current_date_str = bare_date_match.group(1)
-                            logger.debug(f"Updated transaction date from continuation line: {current_date_str}")
-                        else:
+                            logger.debug(f"Updated Refund From transaction date: {current_date_str}")
+                            is_valid_continuation = True  # Mark as valid so we don't skip
+
+                    if is_valid_continuation:
+                        # Only accumulate non-date lines
+                        if not bare_date_match:
                             # Debug: Log if continuation line adds amounts
                             if amounts_with_pos:
                                 desc_preview = ' '.join(current_description_lines)[:40]
