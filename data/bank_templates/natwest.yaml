@@ -114,13 +114,13 @@ natwest:
   # Transaction patterns for regex extraction
   transaction_patterns:
     # NatWest format: Lines ending with 1 or 2 decimal amounts
-    # Format: description (2+ spaces) amount [balance]
+    # Format: description (space) amount [balance]
     # Examples:
     # "918617916401812101  150.00 199.45" -> amount=150.00, balance=199.45
+    # "217810605000N 20.00 69.45" -> amount=20.00, balance=69.45
     # "18 DEC 2024 BROUGHT FORWARD 49.45" -> amount=49.45, balance=None
-    # Must have at least 2 spaces before the amount to avoid matching text with decimal numbers
     standard: |
-      (?P<description>.+?)\s{2,}(?P<amount>[\d,]+\.\d{2})(?:\s+(?P<balance>[\d,]+\.\d{2}))?\s*$
+      (?P<description>.+?)\s+(?P<amount>[\d,]+\.\d{2})(?:\s+(?P<balance>[\d,]+\.\d{2}))?\s*$
 
 # Notes for parser implementation:
 # 1. NatWest uses multi-line descriptions - need to handle line continuation

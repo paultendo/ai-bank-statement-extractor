@@ -276,13 +276,32 @@ class TransactionParser:
             'refund',
             'cashback',
             'interest',
+            ' from ',  # Transfer FROM someone (e.g., "FROM HUBBY")
+            'received from',
         ]
 
+        # Check for money in first
         if any(keyword in description_lower for keyword in money_in_keywords):
             return 'paid_in'
-        else:
-            # Everything else is withdrawn (card payments, online transactions, direct debits, etc.)
+
+        # Money OUT indicators
+        money_out_keywords = [
+            ' to ',  # Transfer TO someone
+            'payment to',
+            'pymt',  # Payment abbreviation
+            'direct debit',
+            'standing order',
+            'card transaction',
+            'card payment',
+            'atm',
+            'cash',
+        ]
+
+        if any(keyword in description_lower for keyword in money_out_keywords):
             return 'withdrawn'
+
+        # Default: if "online transaction" without clear FROM/TO, assume withdrawal
+        return 'withdrawn'
 
     def parse_text(
         self,
@@ -315,7 +334,8 @@ class TransactionParser:
         start_idx = (self.header_line_idx + 1) if self.header_line_idx is not None else 0
 
         # Pattern to match lines with amounts (these are transaction lines)
-        amount_line_pattern = re.compile(r'.*\s{2,}([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$')
+        # Note: Only requires 1+ spaces before amount (not 2+) to catch all transaction lines
+        amount_line_pattern = re.compile(r'.*\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?\s*$')
 
         # Track current date (one date applies to multiple transactions in NatWest format)
         current_date_str = None
@@ -439,7 +459,7 @@ class TransactionParser:
             return None
 
         # Build full description (combine with any description text on the amount line)
-        line_desc_match = re.match(r'(.+?)\s{2,}[\d,]+\.\d{2}', line)
+        line_desc_match = re.match(r'(.+?)\s+[\d,]+\.\d{2}', line)
         if line_desc_match:
             line_desc = line_desc_match.group(1).strip()
             # Remove date from line description if present
