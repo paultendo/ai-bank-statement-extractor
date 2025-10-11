@@ -267,11 +267,13 @@ class TransactionParser:
         description_lower = description.lower()
 
         # Money IN indicators (specific to UK banking)
+        # ORDER MATTERS: Check specific phrases before generic ones
         money_in_keywords = [
             'automated credit',  # NatWest specific
+            'cash & dep',  # Cash and Deposit Machine
+            'deposit',
             'credit',
             'paid in',
-            'deposit',
             'salary',
             'refund',
             'cashback',
@@ -285,16 +287,17 @@ class TransactionParser:
             return 'paid_in'
 
         # Money OUT indicators
+        # ORDER MATTERS: Check specific phrases before generic ones
         money_out_keywords = [
+            'cash withdrawal',  # Explicit withdrawal
+            'atm',
+            'card transaction',
+            'card payment',
+            'direct debit',
+            'standing order',
             ' to ',  # Transfer TO someone
             'payment to',
             'pymt',  # Payment abbreviation
-            'direct debit',
-            'standing order',
-            'card transaction',
-            'card payment',
-            'atm',
-            'cash',
         ]
 
         if any(keyword in description_lower for keyword in money_out_keywords):
