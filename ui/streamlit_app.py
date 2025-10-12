@@ -304,8 +304,7 @@ def main():
             st.metric("Total Money Out", format_currency(total_out))
 
         with sum_cols[2]:
-            delta_label = "positive" if net >= 0 else "negative"
-            st.metric("Net Change", format_currency(net), delta=format_currency(net))
+            st.metric("Net Change", format_currency(net))
 
         # Warnings
         if result.warnings:
