@@ -20,6 +20,10 @@ from .halifax_parser import HalifaxParser
 from .hsbc_parser import HSBCParser
 from .natwest_parser import NatWestParser
 from .barclays_parser import BarclaysParser
+from .monzo_parser import MonzoTransactionParser
+from .santander_parser import SantanderParser
+from .tsb_parser import TSBParser
+from .nationwide_parser import NationwideParser
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,10 @@ class TransactionParser:
             'hsbc': HSBCParser,
             'natwest': NatWestParser,
             'barclays': BarclaysParser,
+            'monzo': MonzoTransactionParser,
+            'santander': SantanderParser,
+            'tsb': TSBParser,
+            'nationwide': NationwideParser,
         }
 
         parser_class = parser_map.get(bank_name)
@@ -115,4 +123,4 @@ class TransactionParser:
         Returns:
             List of supported bank names
         """
-        return ['halifax', 'hsbc', 'natwest', 'barclays']
+        return ['halifax', 'hsbc', 'natwest', 'barclays', 'monzo', 'santander']
