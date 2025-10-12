@@ -28,59 +28,87 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for beautiful styling
+# Custom CSS for Matrix-inspired beautiful styling
 st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
     .main {
         padding: 2rem;
+        background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
     }
     .stAlert {
         margin-top: 1rem;
     }
     .upload-box {
-        border: 2px dashed #4CAF50;
+        border: 2px dashed #00ff41;
         border-radius: 10px;
         padding: 2rem;
         text-align: center;
         margin: 1rem 0;
+        background: rgba(0, 255, 65, 0.05);
+        box-shadow: 0 0 20px rgba(0, 255, 65, 0.2);
     }
     .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #0f3443 0%, #34e89e 100%);
         padding: 1.5rem;
         border-radius: 10px;
         color: white;
         margin: 0.5rem 0;
+        border: 1px solid rgba(0, 255, 65, 0.3);
+        box-shadow: 0 0 30px rgba(0, 255, 65, 0.2);
+        animation: glow 2s ease-in-out infinite alternate;
     }
     .success-card {
-        background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+        background: linear-gradient(135deg, #00ff41 0%, #00d93f 100%);
         padding: 1.5rem;
         border-radius: 10px;
-        color: white;
+        color: #000;
         margin: 0.5rem 0;
+        font-weight: 700;
+        box-shadow: 0 0 40px rgba(0, 255, 65, 0.4);
+        text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
     }
     .warning-card {
-        background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+        background: linear-gradient(135deg, #ff0055 0%, #ff4488 100%);
         padding: 1.5rem;
         border-radius: 10px;
         color: white;
         margin: 0.5rem 0;
+        box-shadow: 0 0 40px rgba(255, 0, 85, 0.3);
+    }
+    @keyframes glow {
+        from {
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.2);
+        }
+        to {
+            box-shadow: 0 0 40px rgba(0, 255, 65, 0.4);
+        }
     }
     .stButton>button {
         width: 100%;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border: none;
+        background: linear-gradient(135deg, #00ff41 0%, #00d93f 100%);
+        color: #000;
+        border: 2px solid #00ff41;
         padding: 0.75rem 1.5rem;
-        font-weight: 600;
+        font-weight: 700;
         border-radius: 8px;
-        transition: transform 0.2s;
+        transition: all 0.3s ease;
+        font-family: 'Share Tech Mono', monospace;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        box-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
     }
     .stButton>button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+        transform: translateY(-2px) scale(1.02);
+        box-shadow: 0 0 40px rgba(0, 255, 65, 0.6);
+        background: linear-gradient(135deg, #00ff41 0%, #00ff88 100%);
     }
     h1, h2, h3 {
-        color: #2c3e50;
+        color: #00ff41;
+        font-family: 'Share Tech Mono', monospace;
+        text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
+        letter-spacing: 1px;
     }
     .bank-badge {
         display: inline-block;
@@ -89,9 +117,24 @@ st.markdown("""
         font-size: 0.9rem;
         font-weight: 600;
         margin: 0.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
     }
     .dataframe {
         font-size: 0.9rem;
+        font-family: 'Share Tech Mono', monospace;
+    }
+    [data-testid="stHeader"] {
+        background: rgba(0, 0, 0, 0.8);
+        border-bottom: 2px solid #00ff41;
+    }
+    .stMarkdown {
+        color: #e0e0e0;
+    }
+    /* Matrix rain effect on sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a0a0a 0%, #1a1a2e 100%);
+        border-right: 2px solid #00ff41;
     }
     </style>
 """, unsafe_allow_html=True)
