@@ -296,7 +296,7 @@ def main():
             """, unsafe_allow_html=True)
 
         with metric_cols[2]:
-            confidence = result.confidence
+            confidence = result.confidence_score
             confidence_class = "success-card" if confidence > 90 else "warning-card" if confidence > 70 else "metric-card"
             st.markdown(f"""
                 <div class="{confidence_class}">
@@ -392,9 +392,9 @@ def main():
             st.metric("Net Change", format_currency(net_change), delta=format_currency(net_change), delta_color=delta_color)
 
         # Validation messages
-        if result.validation_messages:
+        if result.warnings:
             st.markdown("### ⚠️ Validation Warnings")
-            for msg in result.validation_messages:
+            for msg in result.warnings:
                 st.warning(msg)
 
         # Export section
