@@ -233,7 +233,7 @@ def main():
         if uploaded_file:
             if st.button("🔍 Extract Data", type="primary"):
                 # Save file temporarily
-                temp_path = f"/tmp/{uploaded_file.name}"
+                temp_path = Path(f"/tmp/{uploaded_file.name}")
                 with open(temp_path, "wb") as f:
                     f.write(st.session_state.uploaded_file_data)
 
