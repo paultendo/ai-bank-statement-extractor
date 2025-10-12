@@ -247,7 +247,7 @@ def main():
                         bank_param = None if selected_bank == 'Auto-detect' else selected_bank.lower()
 
                         # Process statement
-                        result = pipeline.process(temp_path, bank=bank_param)
+                        result = pipeline.process(temp_path, bank_name=bank_param)
 
                         # Store result in session state
                         st.session_state.extraction_result = result
