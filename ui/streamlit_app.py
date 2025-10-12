@@ -173,7 +173,7 @@ def main():
     with col2:
         st.markdown("### 🚀 Process")
         if uploaded_file:
-            if st.button("🔍 Extract Data", type="primary", use_container_width=True):
+            if st.button("🔍 Extract Data", use_container_width=True):
                 temp_path = Path(f"/tmp/{uploaded_file.name}")
                 with open(temp_path, "wb") as f:
                     f.write(st.session_state.uploaded_file_data)
