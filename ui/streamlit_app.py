@@ -35,7 +35,7 @@ st.markdown("""
 
     .main {
         padding: 2rem;
-        background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 100%);
+        background: #0d1117;
     }
     .stAlert {
         margin-top: 1rem;
@@ -133,8 +133,15 @@ st.markdown("""
     }
     /* Matrix rain effect on sidebar */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a0a0a 0%, #1a1a2e 100%);
+        background: #0d1117;
         border-right: 2px solid #00ff41;
+    }
+    /* Override Streamlit's default white backgrounds */
+    .stApp {
+        background: #0d1117;
+    }
+    section[data-testid="stSidebar"] > div {
+        background: #0d1117;
     }
     </style>
 """, unsafe_allow_html=True)
