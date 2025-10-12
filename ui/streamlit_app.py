@@ -352,7 +352,7 @@ def main():
                 'Money Out': txn.money_out if txn.money_out > 0 else None,
                 'Balance': txn.balance,
                 'Type': txn.transaction_type.value if txn.transaction_type else '',
-                'Confidence': f"{txn.confidence:.1f}%" if txn.confidence else ''
+                'Confidence': txn.confidence if txn.confidence else 0.0
             })
 
         df = pd.DataFrame(df_data)
@@ -362,7 +362,8 @@ def main():
             df.style.format({
                 'Money In': lambda x: format_currency(x) if pd.notna(x) else '-',
                 'Money Out': lambda x: format_currency(x) if pd.notna(x) else '-',
-                'Balance': lambda x: format_currency(x) if pd.notna(x) else '-'
+                'Balance': lambda x: format_currency(x) if pd.notna(x) else '-',
+                'Confidence': lambda x: f"{x:.1f}%" if pd.notna(x) and x > 0 else '-'
             }).background_gradient(
                 subset=['Confidence'],
                 cmap='RdYlGn',
