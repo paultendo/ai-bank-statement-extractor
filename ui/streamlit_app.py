@@ -28,120 +28,196 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Matrix-inspired beautiful styling
+# Custom CSS for PROPER Matrix theme
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
 
+    /* FORCE DARK BACKGROUND EVERYWHERE */
+    .stApp {
+        background-color: #000000 !important;
+    }
     .main {
-        padding: 2rem;
-        background: #0d1117;
+        background-color: #000000 !important;
+        color: #00ff41 !important;
     }
-    .stAlert {
-        margin-top: 1rem;
+    [data-testid="stSidebar"] {
+        background-color: #000000 !important;
+        border-right: 2px solid #00ff41 !important;
     }
-    .upload-box {
-        border: 2px dashed #00ff41;
-        border-radius: 10px;
-        padding: 2rem;
-        text-align: center;
-        margin: 1rem 0;
-        background: rgba(0, 255, 65, 0.05);
-        box-shadow: 0 0 20px rgba(0, 255, 65, 0.2);
+    [data-testid="stSidebar"] > div {
+        background-color: #000000 !important;
     }
+
+    /* Matrix green text everywhere */
+    body, p, div, span, label, .stMarkdown {
+        color: #00ff41 !important;
+        font-family: 'Space Mono', monospace !important;
+    }
+
+    /* Headers with neon glow */
+    h1, h2, h3 {
+        color: #00ff41 !important;
+        font-family: 'Space Mono', monospace !important;
+        text-shadow: 0 0 20px rgba(0, 255, 65, 0.8), 0 0 40px rgba(0, 255, 65, 0.5) !important;
+        letter-spacing: 2px !important;
+        text-transform: uppercase !important;
+    }
+
+    /* File uploader with neon border */
+    [data-testid="stFileUploader"] {
+        background-color: rgba(0, 255, 65, 0.05) !important;
+        border: 2px dashed #00ff41 !important;
+        border-radius: 10px !important;
+        padding: 2rem !important;
+        box-shadow: 0 0 30px rgba(0, 255, 65, 0.3) !important;
+    }
+    [data-testid="stFileUploader"] label {
+        color: #00ff41 !important;
+    }
+
+    /* Metric cards with glow */
     .metric-card {
-        background: linear-gradient(135deg, #0f3443 0%, #34e89e 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        margin: 0.5rem 0;
-        border: 1px solid rgba(0, 255, 65, 0.3);
-        box-shadow: 0 0 30px rgba(0, 255, 65, 0.2);
-        animation: glow 2s ease-in-out infinite alternate;
+        background: rgba(0, 20, 10, 0.8) !important;
+        border: 2px solid #00ff41 !important;
+        border-radius: 10px !important;
+        padding: 1.5rem !important;
+        box-shadow: 0 0 40px rgba(0, 255, 65, 0.4), inset 0 0 20px rgba(0, 255, 65, 0.1) !important;
+        animation: pulse 2s ease-in-out infinite !important;
     }
     .success-card {
-        background: linear-gradient(135deg, #00ff41 0%, #00d93f 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: #000;
-        margin: 0.5rem 0;
-        font-weight: 700;
-        box-shadow: 0 0 40px rgba(0, 255, 65, 0.4);
-        text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+        background: rgba(0, 255, 65, 0.2) !important;
+        border: 2px solid #00ff41 !important;
+        border-radius: 10px !important;
+        padding: 1.5rem !important;
+        box-shadow: 0 0 60px rgba(0, 255, 65, 0.6) !important;
     }
     .warning-card {
-        background: linear-gradient(135deg, #ff0055 0%, #ff4488 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        margin: 0.5rem 0;
-        box-shadow: 0 0 40px rgba(255, 0, 85, 0.3);
+        background: rgba(255, 0, 0, 0.2) !important;
+        border: 2px solid #ff0055 !important;
+        border-radius: 10px !important;
+        padding: 1.5rem !important;
+        box-shadow: 0 0 60px rgba(255, 0, 85, 0.6) !important;
     }
-    @keyframes glow {
-        from {
-            box-shadow: 0 0 20px rgba(0, 255, 65, 0.2);
+
+    @keyframes pulse {
+        0%, 100% {
+            box-shadow: 0 0 30px rgba(0, 255, 65, 0.3), inset 0 0 15px rgba(0, 255, 65, 0.1);
         }
-        to {
-            box-shadow: 0 0 40px rgba(0, 255, 65, 0.4);
+        50% {
+            box-shadow: 0 0 60px rgba(0, 255, 65, 0.6), inset 0 0 30px rgba(0, 255, 65, 0.2);
         }
     }
+
+    /* Neon buttons */
     .stButton>button {
-        width: 100%;
-        background: linear-gradient(135deg, #00ff41 0%, #00d93f 100%);
-        color: #000;
-        border: 2px solid #00ff41;
-        padding: 0.75rem 1.5rem;
-        font-weight: 700;
-        border-radius: 8px;
-        transition: all 0.3s ease;
-        font-family: 'Share Tech Mono', monospace;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        box-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
+        width: 100% !important;
+        background: rgba(0, 255, 65, 0.1) !important;
+        color: #00ff41 !important;
+        border: 3px solid #00ff41 !important;
+        border-radius: 0px !important;
+        padding: 1rem 2rem !important;
+        font-family: 'Space Mono', monospace !important;
+        font-weight: 700 !important;
+        font-size: 1.1rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 3px !important;
+        box-shadow: 0 0 40px rgba(0, 255, 65, 0.5), inset 0 0 20px rgba(0, 255, 65, 0.2) !important;
+        transition: all 0.3s ease !important;
     }
     .stButton>button:hover {
-        transform: translateY(-2px) scale(1.02);
-        box-shadow: 0 0 40px rgba(0, 255, 65, 0.6);
-        background: linear-gradient(135deg, #00ff41 0%, #00ff88 100%);
+        background: rgba(0, 255, 65, 0.3) !important;
+        box-shadow: 0 0 80px rgba(0, 255, 65, 0.8), inset 0 0 40px rgba(0, 255, 65, 0.4) !important;
+        transform: translateY(-2px) !important;
     }
-    h1, h2, h3 {
-        color: #00ff41;
-        font-family: 'Share Tech Mono', monospace;
-        text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
-        letter-spacing: 1px;
+
+    /* Selectbox with neon style */
+    .stSelectbox > div > div {
+        background-color: rgba(0, 20, 10, 0.8) !important;
+        border: 2px solid #00ff41 !important;
+        color: #00ff41 !important;
+        border-radius: 0px !important;
+        box-shadow: 0 0 20px rgba(0, 255, 65, 0.3) !important;
     }
-    .bank-badge {
-        display: inline-block;
-        padding: 0.3rem 0.8rem;
-        border-radius: 20px;
-        font-size: 0.9rem;
-        font-weight: 600;
-        margin: 0.2rem;
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+
+    /* Metric styling */
+    [data-testid="stMetric"] {
+        background-color: rgba(0, 20, 10, 0.8) !important;
+        border: 1px solid #00ff41 !important;
+        border-radius: 5px !important;
+        padding: 1rem !important;
+        box-shadow: 0 0 20px rgba(0, 255, 65, 0.3) !important;
     }
+    [data-testid="stMetricLabel"] {
+        color: #00ff41 !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #00ff41 !important;
+        text-shadow: 0 0 10px rgba(0, 255, 65, 0.8) !important;
+    }
+
+    /* DataFrame with Matrix styling */
     .dataframe {
-        font-size: 0.9rem;
-        font-family: 'Share Tech Mono', monospace;
+        background-color: rgba(0, 20, 10, 0.8) !important;
+        border: 2px solid #00ff41 !important;
+        font-family: 'Space Mono', monospace !important;
+        color: #00ff41 !important;
     }
-    [data-testid="stHeader"] {
-        background: rgba(0, 0, 0, 0.8);
-        border-bottom: 2px solid #00ff41;
+    .dataframe thead tr th {
+        background-color: rgba(0, 255, 65, 0.2) !important;
+        color: #00ff41 !important;
+        border: 1px solid #00ff41 !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
     }
-    .stMarkdown {
-        color: #e0e0e0;
+    .dataframe tbody tr td {
+        background-color: rgba(0, 10, 5, 0.9) !important;
+        color: #00ff41 !important;
+        border: 1px solid rgba(0, 255, 65, 0.3) !important;
     }
-    /* Matrix rain effect on sidebar */
-    [data-testid="stSidebar"] {
-        background: #0d1117;
-        border-right: 2px solid #00ff41;
+
+    /* Bank badges */
+    .bank-badge {
+        background: rgba(0, 255, 65, 0.2) !important;
+        border: 2px solid #00ff41 !important;
+        color: #00ff41 !important;
+        padding: 0.4rem 1rem !important;
+        border-radius: 0px !important;
+        font-family: 'Space Mono', monospace !important;
+        font-weight: 700 !important;
+        box-shadow: 0 0 20px rgba(0, 255, 65, 0.4) !important;
+        text-transform: uppercase !important;
+        letter-spacing: 1px !important;
     }
-    /* Override Streamlit's default white backgrounds */
-    .stApp {
-        background: #0d1117;
+
+    /* Success/warning alerts */
+    .stAlert {
+        background-color: rgba(0, 255, 65, 0.1) !important;
+        border: 2px solid #00ff41 !important;
+        border-radius: 0px !important;
+        color: #00ff41 !important;
     }
-    section[data-testid="stSidebar"] > div {
-        background: #0d1117;
+
+    /* Download button */
+    .stDownloadButton>button {
+        background: rgba(0, 255, 65, 0.1) !important;
+        color: #00ff41 !important;
+        border: 2px solid #00ff41 !important;
+        font-family: 'Space Mono', monospace !important;
+        text-transform: uppercase !important;
+        box-shadow: 0 0 30px rgba(0, 255, 65, 0.4) !important;
+    }
+
+    /* Info boxes */
+    .stInfo {
+        background: rgba(0, 100, 255, 0.1) !important;
+        border: 2px solid #00ccff !important;
+        color: #00ccff !important;
+    }
+
+    /* Remove default padding */
+    .block-container {
+        padding-top: 2rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
