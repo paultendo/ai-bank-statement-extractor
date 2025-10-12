@@ -62,10 +62,25 @@ st.markdown("""
         font-size: 0.75rem !important;
         letter-spacing: 0.05em !important;
         padding: 1rem !important;
+        position: relative !important;
+        z-index: 1 !important;
     }
 
     .dataframe tbody tr td {
         padding: 0.875rem 1rem !important;
+    }
+
+    /* Fix column sort dropdown visibility */
+    [data-testid="stDataFrameResizable"] button {
+        z-index: 100 !important;
+        position: relative !important;
+    }
+
+    /* Fix dropdown menu positioning */
+    .stDataFrame [role="menu"] {
+        z-index: 1000 !important;
+        background: white !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
     }
 
     /* Metrics */
@@ -243,35 +258,36 @@ def main():
         # Transactions table
         st.markdown("### 💰 Transactions")
 
-        df_data = []
-        for txn in result.transactions:
-            df_data.append({
-                'Date': txn.date.strftime('%d/%m/%Y') if txn.date else '',
-                'Description': txn.description,
-                'Money In': txn.money_in if txn.money_in > 0 else None,
-                'Money Out': txn.money_out if txn.money_out > 0 else None,
-                'Balance': txn.balance,
-                'Type': txn.transaction_type.value if txn.transaction_type else '',
-                'Confidence': txn.confidence if txn.confidence else 0.0
-            })
+        with st.spinner("Loading transaction table..."):
+            df_data = []
+            for txn in result.transactions:
+                df_data.append({
+                    'Date': txn.date.strftime('%d/%m/%Y') if txn.date else '',
+                    'Description': txn.description,
+                    'Money In': txn.money_in if txn.money_in > 0 else None,
+                    'Money Out': txn.money_out if txn.money_out > 0 else None,
+                    'Balance': txn.balance,
+                    'Type': txn.transaction_type.value if txn.transaction_type else '',
+                    'Confidence': txn.confidence if txn.confidence else 0.0
+                })
 
-        df = pd.DataFrame(df_data)
+            df = pd.DataFrame(df_data)
 
-        st.dataframe(
-            df.style.format({
-                'Money In': lambda x: format_currency(x) if pd.notna(x) else '-',
-                'Money Out': lambda x: format_currency(x) if pd.notna(x) else '-',
-                'Balance': lambda x: format_currency(x) if pd.notna(x) else '-',
-                'Confidence': lambda x: f"{x:.1f}%" if pd.notna(x) and x > 0 else '-'
-            }).background_gradient(
-                subset=['Confidence'],
-                cmap='RdYlGn',
-                vmin=70,
-                vmax=100
-            ),
-            use_container_width=True,
-            height=400
-        )
+            st.dataframe(
+                df.style.format({
+                    'Money In': lambda x: format_currency(x) if pd.notna(x) else '-',
+                    'Money Out': lambda x: format_currency(x) if pd.notna(x) else '-',
+                    'Balance': lambda x: format_currency(x) if pd.notna(x) else '-',
+                    'Confidence': lambda x: f"{x:.1f}%" if pd.notna(x) and x > 0 else '-'
+                }).background_gradient(
+                    subset=['Confidence'],
+                    cmap='RdYlGn',
+                    vmin=70,
+                    vmax=100
+                ),
+                use_container_width=True,
+                height=400
+            )
 
         # Summary statistics
         st.markdown("### 📈 Summary")
