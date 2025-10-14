@@ -105,6 +105,60 @@ class ExtractionPipeline:
                     processing_time=time.time() - start_time
                 )
 
+            # 2c.1. Fix balances for combined statements
+            # For combined statements, the opening/closing balances extracted from metadata
+            # refer to the first period only. We need to use transaction data instead.
+            if hasattr(statement, '_is_combined') and statement._is_combined and transactions:
+                # Sort transactions by date to find chronological first/last
+                sorted_txns = sorted(transactions, key=lambda t: t.date)
+
+                # Calculate opening balance from chronologically first transaction
+                first_txn = sorted_txns[0]
+                calculated_opening = first_txn.balance - first_txn.money_in + first_txn.money_out
+
+                # Use chronologically last transaction's balance as closing
+                calculated_closing = sorted_txns[-1].balance
+
+                logger.info(f"Combined statement balance correction:")
+                logger.info(f"  Opening: £{statement.opening_balance:.2f} → £{calculated_opening:.2f} (from {first_txn.date.date()})")
+                logger.info(f"  Closing: £{statement.closing_balance:.2f} → £{calculated_closing:.2f} (from {sorted_txns[-1].date.date()})")
+
+                statement.opening_balance = calculated_opening
+                statement.closing_balance = calculated_closing
+
+            # 2c.2. Refine period dates from transactions if needed
+            # When statement only has a single date (not a period range), infer the range from transactions
+            if statement.statement_start_date == statement.statement_end_date and transactions:
+                sorted_txns = sorted(transactions, key=lambda t: t.date)
+                actual_start = sorted_txns[0].date
+                actual_end = sorted_txns[-1].date
+
+                logger.info(f"Refining statement period from transactions:")
+                logger.info(f"  Original: {statement.statement_start_date.date()} to {statement.statement_end_date.date()}")
+                logger.info(f"  Refined: {actual_start.date()} to {actual_end.date()}")
+
+                statement.statement_start_date = actual_start
+                statement.statement_end_date = actual_end
+
+            # 2c.3. Calculate balances from transactions if missing
+            # When statement has no balance metadata (both opening and closing are 0), calculate from transactions
+            if statement.opening_balance == 0.0 and statement.closing_balance == 0.0 and transactions:
+                sorted_txns = sorted(transactions, key=lambda t: t.date)
+
+                # Calculate opening balance from first transaction
+                first_txn = sorted_txns[0]
+                calculated_opening = first_txn.balance - first_txn.money_in + first_txn.money_out
+
+                # Use last transaction's balance as closing
+                calculated_closing = sorted_txns[-1].balance
+
+                logger.info(f"Calculating statement balances from transactions:")
+                logger.info(f"  Opening: £0.00 → £{calculated_opening:.2f} (from {first_txn.date.date()})")
+                logger.info(f"  Closing: £0.00 → £{calculated_closing:.2f} (from {sorted_txns[-1].date.date()})")
+
+                statement.opening_balance = calculated_opening
+                statement.closing_balance = calculated_closing
+
             # 2d. Validate balances
             balance_reconciled = False
             warnings = []
@@ -199,45 +253,8 @@ class ExtractionPipeline:
 
         # Try PDF text extraction
         if file_path.suffix.lower() == '.pdf':
-            # Check if this is Halifax, HSBC, NatWest, or Barclays - use pdftotext for layout preservation
-            # (Halifax PDFs have font issues, HSBC/NatWest/Barclays need precise column positions)
-            try:
-                # Quick peek to detect bank
-                text_sample, _ = self.pdf_extractor.extract(file_path)
-                if text_sample:
-                    bank_detected = None
-                    text_lower = text_sample.lower()
-
-                    if 'halifax' in text_lower:
-                        bank_detected = 'Halifax'
-                    elif 'hsbc' in text_lower:
-                        bank_detected = 'HSBC'
-                    elif 'natwest' in text_lower or 'national westminster' in text_lower:
-                        bank_detected = 'NatWest'
-                    elif 'barclays' in text_lower:
-                        bank_detected = 'Barclays'
-
-                    if bank_detected:
-                        logger.info(f"Detected {bank_detected} statement - using pdftotext for layout preservation")
-                        text, confidence = self.pdftotext_extractor.extract(file_path)
-                        if text:
-                            logger.info(f"✓ pdftotext extraction successful")
-                            return text, confidence, "pdftotext"
-            except Exception:
-                pass  # Continue to normal extraction flow
-
-            # Try pdfplumber first (works well for most PDFs)
-            try:
-                text, confidence = self.pdf_extractor.extract(file_path)
-                if text and confidence > 80:
-                    logger.info(f"✓ PDF extraction successful (confidence: {confidence:.1f}%)")
-                    return text, confidence, "pdfplumber"
-                elif text:
-                    logger.warning(f"pdfplumber produced low-confidence text ({confidence:.1f}%), trying pdftotext...")
-            except Exception as e:
-                logger.warning(f"pdfplumber extraction failed: {e}, trying pdftotext...")
-
-            # Try pdftotext as fallback (better for some PDFs with font issues)
+            # Use pdftotext for all supported banks (it's faster and more reliable for layout preservation)
+            # Only fall back to pdfplumber for unknown banks
             try:
                 text, confidence = self.pdftotext_extractor.extract(file_path)
                 if text:
@@ -342,29 +359,44 @@ class ExtractionPipeline:
             period_start_str = extracted.get('period_start')
             period_end_str = extracted.get('period_end')
 
+            # Handle statements with only a statement_date (no explicit period range)
             if not period_start_str or not period_end_str:
-                logger.error("Missing statement period dates")
-                return None
+                statement_date_str = extracted.get('statement_date')
+                if not statement_date_str:
+                    logger.error("Missing statement period dates")
+                    return None
 
-            # Parse end date first (it has the year)
-            statement_end = parse_date(period_end_str, bank_config.date_formats)
-            if not statement_end:
-                logger.error("Could not parse statement end date")
-                return None
+                # Use statement date as a reference point
+                # We'll infer the actual period from transaction dates later
+                statement_date = parse_date(statement_date_str, bank_config.date_formats)
+                if not statement_date:
+                    logger.error("Could not parse statement date")
+                    return None
 
-            # For HSBC: if start date doesn't have year, add it from end date
-            if bank_config.bank_name.lower() == 'hsbc':
-                # Check if period_start_str has a 4-digit year
-                import re
-                if not re.search(r'\d{4}', period_start_str):
-                    # Add year from end date
-                    period_start_str = f"{period_start_str} {statement_end.year}"
-                    logger.debug(f"Added year to HSBC period_start: {period_start_str}")
+                # Use statement date for both start and end (will be refined from transactions)
+                statement_start = statement_date
+                statement_end = statement_date
+                logger.info(f"Using statement date {statement_date.date()} as initial period (will be refined from transactions)")
+            else:
+                # Parse end date first (it has the year)
+                statement_end = parse_date(period_end_str, bank_config.date_formats)
+                if not statement_end:
+                    logger.error("Could not parse statement end date")
+                    return None
 
-            statement_start = parse_date(period_start_str, bank_config.date_formats)
-            if not statement_start:
-                logger.error("Could not parse statement start date")
-                return None
+                # For HSBC: if start date doesn't have year, add it from end date
+                if bank_config.bank_name.lower() == 'hsbc':
+                    # Check if period_start_str has a 4-digit year
+                    import re
+                    if not re.search(r'\d{4}', period_start_str):
+                        # Add year from end date
+                        period_start_str = f"{period_start_str} {statement_end.year}"
+                        logger.debug(f"Added year to HSBC period_start: {period_start_str}")
+
+                statement_start = parse_date(period_start_str, bank_config.date_formats)
+                if not statement_start:
+                    logger.error("Could not parse statement start date")
+                    return None
 
             # Balances
             opening_balance = parse_currency(extracted.get('previous_balance', '0'))
@@ -373,6 +405,25 @@ class ExtractionPipeline:
             if opening_balance is None or closing_balance is None:
                 logger.error("Could not parse statement balances")
                 return None
+
+            # Check if this is a combined statement with multiple periods
+            # For combined statements, expand date range to cover all periods
+            expanded_start, expanded_end = self._detect_combined_statement_date_range(
+                text,
+                statement_start,
+                statement_end,
+                bank_config
+            )
+
+            is_combined_statement = False
+            if expanded_start and expanded_end:
+                logger.info(f"Combined statement detected - expanded date range from "
+                           f"{statement_start.date()} to {statement_end.date()} → "
+                           f"{expanded_start.date()} to {expanded_end.date()}")
+                statement_start = expanded_start
+                statement_end = expanded_end
+                is_combined_statement = True
+                # Note: For combined statements, balances will be corrected after parsing transactions
 
             statement = Statement(
                 bank_name=bank_config.bank_name,
@@ -386,6 +437,9 @@ class ExtractionPipeline:
                 sort_code=sort_code
             )
 
+            # Store combined statement flag for later use
+            statement._is_combined = is_combined_statement
+
             logger.info(f"✓ Metadata extracted: {account_number}, {statement_start.date()} to {statement_end.date()}")
             logger.debug(f"Account holder: '{account_holder}', Sort code: '{sort_code}'")
             return statement
@@ -393,6 +447,107 @@ class ExtractionPipeline:
         except Exception as e:
             logger.error(f"Failed to extract statement metadata: {e}")
             return None
+
+    def _detect_combined_statement_date_range(
+        self,
+        text: str,
+        initial_start: datetime,
+        initial_end: datetime,
+        bank_config: BankConfig
+    ) -> tuple:
+        """
+        Detect if this is a combined statement with multiple periods.
+        If so, find the full date range by scanning all period markers.
+
+        Args:
+            text: Statement text
+            initial_start: Initial statement start date
+            initial_end: Initial statement end date
+            bank_config: Bank configuration
+
+        Returns:
+            Tuple of (expanded_start, expanded_end) or (None, None) if not combined
+        """
+        import re
+        from .utils import parse_date, infer_year_from_period
+
+        # Look for period markers - different banks use different patterns:
+        # - Barclays: "DD Mon YYYY Start balance" or "DD Mon YYYY BROUGHT FORWARD"
+        # - Monzo: "DD/MM/YYYY - DD/MM/YYYY" date ranges
+
+        # Pattern 1: Barclays-style period markers
+        barclays_markers = re.findall(
+            r'^\s*(\d{1,2}\s+[A-Z][a-z]{2,9}(?:\s+\d{4})?)\s+(?:Start balance|BROUGHT FORWARD)',
+            text,
+            re.MULTILINE | re.IGNORECASE
+        )
+
+        # Pattern 2: Monzo-style date ranges (extract both start and end dates)
+        monzo_ranges = re.findall(
+            r'(\d{1,2}/\d{1,2}/\d{4})\s*-\s*(\d{1,2}/\d{1,2}/\d{4})',
+            text,
+            re.MULTILINE
+        )
+
+        # Use whichever pattern found more matches
+        if len(barclays_markers) > 1:
+            period_markers = barclays_markers
+            pattern_type = "Barclays-style"
+        elif len(monzo_ranges) > 1:
+            period_markers = monzo_ranges
+            pattern_type = "Monzo-style"
+        else:
+            # Single period, no expansion needed
+            return None, None
+
+        logger.info(f"Found {len(period_markers)} {pattern_type} period markers - this is a combined statement")
+
+        # Parse all period dates
+        period_dates = []
+        for marker in period_markers:
+            if pattern_type == "Barclays-style":
+                # Parse start dates only
+                parsed = infer_year_from_period(marker, initial_start, initial_end)
+                if not parsed:
+                    parsed = parse_date(marker, bank_config.date_formats)
+                if parsed:
+                    period_dates.append(parsed)
+                    logger.debug(f"Parsed period marker: {marker} → {parsed.date()}")
+                else:
+                    logger.warning(f"Could not parse period marker: {marker}")
+            else:
+                # Monzo: marker is a tuple (start_date, end_date)
+                start_str, end_str = marker
+                start_parsed = parse_date(start_str, bank_config.date_formats)
+                end_parsed = parse_date(end_str, bank_config.date_formats)
+                if start_parsed and end_parsed:
+                    period_dates.append(start_parsed)
+                    period_dates.append(end_parsed)
+                    logger.debug(f"Parsed period range: {start_str} - {end_str} → {start_parsed.date()} to {end_parsed.date()}")
+                else:
+                    logger.warning(f"Could not parse period range: {start_str} - {end_str}")
+
+        if len(period_dates) < 2:
+            # Couldn't parse enough dates to determine range
+            return None, None
+
+        # Find earliest and latest dates
+        earliest = min(period_dates)
+        latest = max(period_dates)
+
+        # The latest period marker is the START of the last period
+        # The actual end date is likely ~30 days after the last marker
+        # Use the original end date if it's later than the latest marker
+        if initial_end > latest:
+            latest = initial_end
+
+        # Similarly, use original start if earlier than earliest marker
+        if initial_start < earliest:
+            earliest = initial_start
+
+        logger.info(f"Combined statement date range: {earliest.date()} to {latest.date()}")
+
+        return earliest, latest
 
     def _parse_transactions(
         self,

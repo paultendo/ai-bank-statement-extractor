@@ -36,6 +36,9 @@ def parse_date(
     if not date_string:
         return None
 
+    # Normalize date string (remove ordinal suffixes, etc.)
+    date_string = normalize_date_string(date_string)
+
     # Default UK/European date formats
     if date_formats is None:
         date_formats = [
@@ -52,6 +55,20 @@ def parse_date(
     # Try each format
     for fmt in date_formats:
         try:
+            # If format doesn't include year, we need to append it to avoid leap year issues
+            # (strptime uses 1900 as default, which isn't a leap year, so "29 Feb" fails)
+            if '%Y' not in fmt and '%y' not in fmt:
+                year_to_use = reference_year if reference_year else datetime.now().year
+
+                # Try parsing with year appended
+                try:
+                    parsed = datetime.strptime(f"{date_string} {year_to_use}", f"{fmt} %Y")
+                    return parsed
+                except ValueError:
+                    # If that fails, try the original format
+                    pass
+
+            # Standard parsing
             parsed = datetime.strptime(date_string, fmt)
 
             # If format doesn't include year, add reference year
@@ -107,8 +124,13 @@ def infer_year_from_period(
         >>> # Transaction: "28 DEC" -> Should be 28 Dec 2024
         >>> # Transaction: "02 JAN" -> Should be 02 Jan 2025
     """
-    # Parse without year (will use current year as placeholder)
-    parsed = parse_date(date_str)
+    # Parse without year, trying both period start and end years
+    # This is crucial for leap year dates like "29 Feb" where one year might not be a leap year
+    parsed = parse_date(date_str, reference_year=period_start.year)
+
+    if not parsed and period_start.year != period_end.year:
+        # If parsing failed (e.g., "29 Feb 2023" doesn't exist), try the end year
+        parsed = parse_date(date_str, reference_year=period_end.year)
 
     if not parsed:
         return None
@@ -120,19 +142,20 @@ def infer_year_from_period(
         # Year explicitly provided, use as-is
         return parsed
 
-    # Start with statement start year as base
-    base_year = period_start.year
-    candidate = parsed.replace(year=base_year)
-
     # Try both years from period
     possible_years = [period_start.year, period_end.year]
 
     for year in set(possible_years):
-        candidate = parsed.replace(year=year)
+        try:
+            # Try to replace year (may fail for leap dates like Feb 29 in non-leap years)
+            candidate = parsed.replace(year=year)
 
-        # Check if date falls within period
-        if period_start.date() <= candidate.date() <= period_end.date():
-            return candidate
+            # Check if date falls within period
+            if period_start.date() <= candidate.date() <= period_end.date():
+                return candidate
+        except ValueError:
+            # Year replacement failed (e.g., Feb 29 in non-leap year)
+            continue
 
     # Cross-year detection (Monopoly pattern):
     # If statement is from early in the year (Jan/Feb) and transaction is from late year (Nov/Dec),
@@ -181,5 +204,8 @@ def normalize_date_string(date_str: str) -> str:
 
     # Normalize month abbreviations (remove periods)
     normalized = re.sub(r'(\w{3})\.', r'\1', normalized)
+
+    # Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+    normalized = re.sub(r'(\d+)(?:st|nd|rd|th)\b', r'\1', normalized)
 
     return normalized

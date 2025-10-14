@@ -15,6 +15,7 @@ from io import BytesIO
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.pipeline import ExtractionPipeline
+from src.analytics import TransactionAnalyzer
 
 # Page config
 st.set_page_config(
@@ -24,22 +25,36 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Minimal, clean CSS - work with Streamlit's default theme
+# Custom styling - work WITH Streamlit's theme system
 st.markdown("""
     <style>
+    /* Load custom fonts */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Mono:wght@500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
 
-    * {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    /* Custom fonts - work with Streamlit theme */
+    html, body, [class*="st-"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
 
-    .monospace {
-        font-family: 'Space Mono', monospace !important;
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        font-weight: 700;
+        letter-spacing: -0.02em;
     }
 
-    h1, h2, h3 {
-        font-weight: 700 !important;
-        letter-spacing: -0.02em !important;
+    /* Monospace for data */
+    code, pre, .monospace {
+        font-family: 'Space Mono', 'Courier New', monospace !important;
+    }
+
+    /* FIX: Material Symbols for icons ONLY - target specific icon classes */
+    .st-emotion-cache-zkd0x0,
+    .st-emotion-cache-pd6qx2,
+    span[style*="Material Symbols"] {
+        font-family: 'Material Symbols Rounded' !important;
+        font-feature-settings: 'liga' !important;
+        -webkit-font-feature-settings: 'liga' !important;
     }
 
     /* Buttons */
@@ -101,6 +116,7 @@ st.markdown("""
         border-radius: 12px !important;
         padding: 1.5rem !important;
     }
+
 
     /* Selectbox */
     .stSelectbox > div > div {
@@ -213,6 +229,16 @@ def main():
     if st.session_state.extraction_result:
         result = st.session_state.extraction_result
 
+        # Check if extraction succeeded
+        if not result.success or result.statement is None:
+            st.error("❌ Extraction failed")
+            if result.error_message:
+                st.error(f"Error: {result.error_message}")
+            if result.warnings:
+                for warning in result.warnings:
+                    st.warning(warning)
+            return
+
         st.markdown("---")
         st.markdown("## 📊 Extraction Results")
 
@@ -222,7 +248,7 @@ def main():
         with cols[0]:
             st.metric(
                 "Bank Detected",
-                result.statement.bank_name.upper() if result.statement.bank_name else 'Unknown'
+                result.statement.bank_name.upper() if result.statement and result.statement.bank_name else 'Unknown'
             )
 
         with cols[1]:
@@ -241,19 +267,23 @@ def main():
         detail_cols = st.columns(3)
 
         with detail_cols[0]:
-            st.metric("Account", result.statement.account_number or "N/A")
+            account = result.statement.account_number if result.statement else "N/A"
+            st.metric("Account", account or "N/A")
 
         with detail_cols[1]:
-            if result.statement.statement_start_date and result.statement.statement_end_date:
+            if result.statement and result.statement.statement_start_date and result.statement.statement_end_date:
                 period = f"{result.statement.statement_start_date.strftime('%d/%m/%Y')} - {result.statement.statement_end_date.strftime('%d/%m/%Y')}"
             else:
                 period = "N/A"
             st.metric("Period", period)
 
         with detail_cols[2]:
-            opening = format_currency(result.statement.opening_balance)
-            closing = format_currency(result.statement.closing_balance)
-            st.metric("Balance", f"{opening} → {closing}")
+            if result.statement:
+                opening = format_currency(result.statement.opening_balance)
+                closing = format_currency(result.statement.closing_balance)
+                st.metric("Balance", f"{opening} → {closing}")
+            else:
+                st.metric("Balance", "N/A")
 
         # Transactions table
         st.markdown("### 💰 Transactions")
@@ -311,6 +341,239 @@ def main():
             st.markdown("### ⚠️ Validation Warnings")
             for msg in result.warnings:
                 st.warning(msg)
+
+        # Analytics section
+        st.markdown("---")
+        st.markdown("## 🔍 Advanced Analytics")
+        st.markdown("*Insights for legal case analysis*")
+
+        try:
+            analyzer = TransactionAnalyzer(result.transactions)
+
+            # Create tabs for different analyses
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "📊 Overview",
+                "🚨 Unusual Spending",
+                "🎰 Gambling",
+                "🔍 Fraud Indicators",
+                "🛍️ Lifestyle"
+            ])
+
+            with tab1:
+                st.markdown("### Financial Overview")
+
+                summary = analyzer.get_summary()
+
+                overview_cols = st.columns(3)
+                with overview_cols[0]:
+                    st.metric("Transaction Count", f"{summary['total_transactions']:,}")
+                    st.metric("Period (days)", f"{summary['date_range']['days']}")
+
+                with overview_cols[1]:
+                    st.metric("Average Daily Balance", format_currency(summary['avg_daily_balance']))
+                    st.metric("Opening Balance", format_currency(summary['opening_balance']))
+
+                with overview_cols[2]:
+                    st.metric("Closing Balance", format_currency(summary['closing_balance']))
+                    net_pct = ((summary['net_change'] / summary['opening_balance']) * 100) if summary['opening_balance'] != 0 else 0
+                    st.metric("Net Change %", f"{net_pct:+.1f}%")
+
+                # Monthly breakdown
+                st.markdown("#### Monthly Breakdown")
+                monthly = analyzer.get_monthly_summary()
+                if monthly:
+                    monthly_df = pd.DataFrame(monthly)
+                    monthly_df['Month'] = monthly_df['month']
+                    monthly_df['Transactions'] = monthly_df['transaction_count']
+                    monthly_df['Money In'] = monthly_df['total_in'].apply(lambda x: format_currency(x))
+                    monthly_df['Money Out'] = monthly_df['total_out'].apply(lambda x: format_currency(x))
+                    monthly_df['Net'] = monthly_df['net'].apply(lambda x: format_currency(x))
+                    monthly_df['Avg Balance'] = monthly_df['avg_balance'].apply(lambda x: format_currency(x))
+
+                    st.dataframe(
+                        monthly_df[['Month', 'Transactions', 'Money In', 'Money Out', 'Net', 'Avg Balance']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+            with tab2:
+                st.markdown("### Unusual Spending Detection")
+                st.markdown("*Transactions significantly above average (3x+ standard deviation)*")
+
+                unusual = analyzer.detect_unusual_spending()
+
+                if unusual:
+                    st.warning(f"🚨 Found **{len(unusual)}** unusual transactions")
+
+                    for i, txn in enumerate(unusual, 1):
+                        with st.expander(f"#{i} - {txn['date']}: {format_currency(txn['amount'])} - {txn['description'][:60]}"):
+                            unusual_cols = st.columns(3)
+                            with unusual_cols[0]:
+                                st.metric("Amount", format_currency(txn['amount']))
+                            with unusual_cols[1]:
+                                st.metric("Deviation", f"{txn['deviation_multiplier']:.1f}x above avg")
+                            with unusual_cols[2]:
+                                st.metric("Balance After", format_currency(txn['balance_after']))
+
+                            st.info(f"**Type:** {txn['type']}")
+                            st.info(f"**Description:** {txn['description']}")
+                            st.info(f"**Mean Spending:** {format_currency(txn['mean_spending'])}")
+                else:
+                    st.success("✅ No unusual spending detected")
+
+            with tab3:
+                st.markdown("### Gambling Activity Analysis")
+                st.markdown("*Detection of betting/casino transactions*")
+
+                gambling = analyzer.analyze_gambling_activity()
+
+                if gambling['detected']:
+                    st.error(f"⚠️ Gambling activity detected: **{gambling['transaction_count']}** transactions")
+
+                    gamble_cols = st.columns(4)
+                    with gamble_cols[0]:
+                        st.metric("Total Spent", format_currency(gambling['total_spent']))
+                    with gamble_cols[1]:
+                        st.metric("Total Won", format_currency(gambling['total_won']))
+                    with gamble_cols[2]:
+                        st.metric("Net Loss", format_currency(gambling['net_loss']))
+                    with gamble_cols[3]:
+                        st.metric("Frequency", f"{gambling['frequency']:.2f}/day")
+
+                    st.markdown(f"**Period:** {gambling['date_range']['first']} to {gambling['date_range']['last']}")
+
+                    # Show transactions
+                    st.markdown("#### Gambling Transactions")
+                    gamble_df = pd.DataFrame(gambling['transactions'])
+                    gamble_df['Date'] = gamble_df['date']
+                    gamble_df['Description'] = gamble_df['description']
+                    gamble_df['Spent'] = gamble_df['money_out'].apply(lambda x: format_currency(x) if x > 0 else '-')
+                    gamble_df['Won'] = gamble_df['money_in'].apply(lambda x: format_currency(x) if x > 0 else '-')
+
+                    st.dataframe(
+                        gamble_df[['Date', 'Description', 'Spent', 'Won']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.success("✅ No gambling activity detected")
+
+            with tab4:
+                st.markdown("### Fraud Indicators")
+                st.markdown("*Patterns consistent with APP fraud or financial coercion*")
+
+                fraud = analyzer.detect_fraud_indicators()
+
+                # Rapid transfers
+                if fraud['rapid_large_transfers']:
+                    st.error(f"🚨 **{len(fraud['rapid_large_transfers'])}** days with multiple large transfers (>£1,000)")
+
+                    for event in fraud['rapid_large_transfers']:
+                        with st.expander(f"{event['date']}: {event['count']} transfers totaling {format_currency(event['total_amount'])}"):
+                            for txn in event['transactions']:
+                                st.write(f"• {txn['description']}: {format_currency(txn['amount'])}")
+                else:
+                    st.success("✅ No rapid large transfers detected")
+
+                # Account drained
+                if fraud['account_drained']:
+                    st.error("🚨 **Account drain detected** (>80% balance drop)")
+
+                    for drain in fraud['drain_events']:
+                        st.warning(f"**{drain['date']}**: {drain['drop_percentage']:.1f}% drop ({format_currency(drain['amount'])}) - {drain['description']}")
+                else:
+                    st.success("✅ No account drain events")
+
+                # Unusual transfer activity
+                if fraud['unusual_transfer_activity']:
+                    st.warning(f"⚠️ **High transfer frequency**: {fraud['transfer_rate_per_day']:.1f} transfers/day (>2.0 threshold)")
+                else:
+                    st.success("✅ Transfer frequency normal")
+
+                # Coercion patterns
+                st.markdown("#### Financial Coercion Indicators")
+                coercion = analyzer.detect_financial_coercion_patterns()
+
+                if coercion['sudden_pattern_changes']:
+                    st.warning("⚠️ **Sudden spending pattern change detected**")
+                    for change in coercion['sudden_pattern_changes']:
+                        st.write(f"• {change['description']}")
+                        st.write(f"  First half avg: {format_currency(change['first_half_avg'])}")
+                        st.write(f"  Second half avg: {format_currency(change['second_half_avg'])}")
+                        st.write(f"  Change: {change['change_percentage']:+.1f}%")
+
+                volatility = coercion['balance_volatility']
+                volatility_status = "High" if volatility > 0.5 else "Normal"
+                volatility_color = "error" if volatility > 0.5 else "success"
+
+                getattr(st, volatility_color)(f"**Balance Volatility:** {volatility:.2f} ({volatility_status})")
+
+            with tab5:
+                st.markdown("### Lifestyle Spending Analysis")
+                st.markdown("*Categorized spending patterns for legal assessments*")
+
+                lifestyle = analyzer.analyze_lifestyle_spending()
+
+                st.info(f"✓ Categorized **{lifestyle['categorized_percentage']:.1f}%** of spending")
+
+                # Top categories
+                st.markdown("#### Spending by Category")
+
+                categories_data = []
+                for category, data in lifestyle['categories'].items():
+                    categories_data.append({
+                        'Category': category.title(),
+                        'Total': format_currency(data['total']),
+                        'Transactions': data['count'],
+                        'Avg per Transaction': format_currency(data['total'] / data['count'])
+                    })
+
+                if categories_data:
+                    cat_df = pd.DataFrame(categories_data)
+                    st.dataframe(cat_df, use_container_width=True, hide_index=True)
+
+                # Income analysis
+                st.markdown("#### Income Sources")
+                income = analyzer.analyze_income_sources()
+
+                income_cols = st.columns(4)
+                with income_cols[0]:
+                    st.metric("Total Income", format_currency(income['total_income']))
+                with income_cols[1]:
+                    st.metric("Average Incoming", format_currency(income['average_incoming']))
+                with income_cols[2]:
+                    st.metric("Regular Streams", len(income['regular_income_streams']))
+                with income_cols[3]:
+                    st.metric("Income Transactions", income['transaction_count'])
+
+                # Income breakdown
+                income_breakdown = []
+                for itype, amount in income['by_type'].items():
+                    if amount > 0:
+                        income_breakdown.append({
+                            'Type': itype.title(),
+                            'Amount': format_currency(amount),
+                            'Percentage': f"{(amount / income['total_income'] * 100):.1f}%"
+                        })
+
+                if income_breakdown:
+                    st.markdown("**Income by Type:**")
+                    inc_df = pd.DataFrame(income_breakdown)
+                    st.dataframe(inc_df, use_container_width=True, hide_index=True)
+
+                # Regular income streams
+                if income['regular_income_streams']:
+                    st.markdown("**Regular Income Streams:**")
+                    for stream in income['regular_income_streams']:
+                        with st.expander(f"{stream['description']}: {format_currency(stream['amount'])} every {stream['frequency_days']:.0f} days"):
+                            st.write(f"**Occurrences:** {stream['occurrences']}")
+                            st.write(f"**Total:** {format_currency(stream['total'])}")
+                            st.write(f"**Period:** {stream['first_date']} to {stream['last_date']}")
+
+        except ValueError as e:
+            st.info(f"ℹ️ Analytics unavailable: {str(e)}")
+        except Exception as e:
+            st.error(f"Error running analytics: {str(e)}")
 
         # Export section
         st.markdown("### 💾 Export Data")

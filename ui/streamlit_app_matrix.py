@@ -2,7 +2,7 @@
 Bank Statement Extractor - Streamlit UI
 
 A beautiful, user-friendly interface for extracting bank statement data.
-Designed for Fifty Six Law legal team.
+Designed for Fifty Six Law legal team via AILEX.
 """
 
 import streamlit as st
@@ -22,7 +22,7 @@ from src.config import settings
 
 # Page configuration
 st.set_page_config(
-    page_title="Bank Statement Extractor | Fifty Six Law",
+    page_title="Bank Statement Extractor",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -262,7 +262,7 @@ def main():
                 🏦 Bank Statement Extractor
             </h1>
             <p style='color: #7f8c8d; font-size: 1.2rem; margin-top: 0.5rem;'>
-                Automated data extraction for legal evidence | Fifty Six Law
+                Automated data extraction for legal evidence
             </p>
         </div>
     """, unsafe_allow_html=True)
@@ -597,7 +597,7 @@ def main():
     st.markdown("---")
     st.markdown("""
         <div style='text-align: center; color: #7f8c8d; padding: 2rem 0;'>
-            <p>Built for <strong>Fifty Six Law</strong> | Powered by AI & Python</p>
+            <p>Built for <strong>instant bank statement extraction</strong></p>
             <p style='font-size: 0.9rem;'>🔒 All processing is local. Your data never leaves this system.</p>
         </div>
     """, unsafe_allow_html=True)

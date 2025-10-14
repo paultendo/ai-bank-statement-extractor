@@ -150,6 +150,49 @@ class BaseTransactionParser(ABC):
     - _find_table_header(): Custom header detection
     - _extract_column_positions(): Custom column extraction
     - _classify_amount(): Custom amount classification
+
+    Common Parsing Patterns:
+    -----------------------
+
+    1. Layout A vs Layout B Transactions:
+       When using pdftotext -layout, transactions may appear in two formats:
+
+       Layout A (all on one line):
+         "16/08/2024    MERCHANT NAME    -93.58    6.98"
+         Use _extract_amounts_from_remainder() to parse.
+
+       Layout B (split across lines):
+         "16/08/2024"
+         "MERCHANT NAME"
+         "                            -93.58    6.98"
+         Parse date, description, and amounts separately.
+
+    2. Foreign Currency Transactions:
+       FX metadata may appear inline with GBP amounts:
+         "Amount: EUR 109.50. Conversion    -93.58    6.98"
+       Use _filter_foreign_currency_amounts() to extract only GBP amounts.
+
+    3. Pattern Matching Priority:
+       When using state machines with "pending" flags, always check for
+       NEW transaction patterns before checking for state completion.
+       This prevents misinterpreting the start of a new transaction
+       as the completion of the previous one.
+
+       Example:
+         # GOOD: Check for new date first
+         if date_match:
+             # Start new transaction
+         elif pending_state:
+             # Complete previous transaction
+
+         # BAD: State check first (can misinterpret new dates)
+         if pending_state:
+             # May mistake new date for state completion!
+
+    4. Multi-line Descriptions:
+       Use MultilineDescriptionExtractor for descriptions spanning
+       multiple lines. It handles position-based continuation detection
+       and footer/header avoidance.
     """
 
     def __init__(self, bank_config: BankConfig):
@@ -409,3 +452,123 @@ class BaseTransactionParser(ABC):
                     return type_map.get(type_name, TransactionType.OTHER)
 
         return TransactionType.OTHER
+
+    def _filter_foreign_currency_amounts(
+        self,
+        line: str,
+        amount_pattern: re.Pattern
+    ) -> List[str]:
+        """
+        Extract GBP amounts from a line containing foreign currency metadata.
+
+        When FX transaction info appears on the same line as GBP amounts,
+        this method filters out the foreign currency amounts to prevent them
+        from being parsed as GBP transaction amounts.
+
+        This is commonly needed when using pdftotext -layout flag, which
+        preserves the visual layout and can place FX metadata and GBP amounts
+        on the same line.
+
+        Common patterns that trigger filtering:
+        - "Amount: EUR 109.50. Conversion    -93.58    6.98"
+          → Extracts: ['-93.58', '6.98']
+        - "Amount: USD 38.06. Conversion"
+          → Extracts: []
+        - "TESCO STORES    -45.67    1254.33"
+          → Extracts: ['-45.67', '1254.33'] (no FX, returns all amounts)
+
+        Args:
+            line: Text line that may contain FX metadata and amounts
+            amount_pattern: Compiled regex pattern for matching amounts (e.g., r'-?[\\d,]+\\.\\d{2}')
+
+        Returns:
+            List of GBP amount strings with foreign currency amounts filtered out
+
+        Example:
+            >>> amount_pattern = re.compile(r'-?[\d,]+\.\d{2}')
+            >>> line = "Amount: EUR -109.50. Conversion  -93.58  6.98"
+            >>> self._filter_foreign_currency_amounts(line, amount_pattern)
+            ['-93.58', '6.98']
+
+        Note:
+            Only applies filtering when "Amount: EUR/USD" pattern is detected.
+            For lines without FX metadata, returns all matched amounts unchanged.
+
+        See Also:
+            - Monzo parser: Uses this extensively for FX transactions
+            - NatWest parser: Uses positional logic (last 2 amounts) instead
+        """
+        # Only apply filtering if FX markers are present
+        # Look for pattern: "Amount:" followed by currency code and amount
+        if not re.search(r'Amount:\s*(USD|EUR)\s*-?[\d,]+', line, re.IGNORECASE):
+            # No FX metadata detected - extract amounts normally
+            return amount_pattern.findall(line)
+
+        # Replace foreign currency amounts with placeholder to exclude them
+        # Pattern matches: "Amount: EUR 109.50" or "Amount: USD -38.06"
+        filtered_line = re.sub(
+            r'Amount:\s*(USD|EUR|GBP)\s*-?[\d,]+\.?\d*\.?',
+            'Amount: [FOREIGN]',
+            line,
+            flags=re.IGNORECASE
+        )
+
+        return amount_pattern.findall(filtered_line)
+
+    def _extract_amounts_from_remainder(
+        self,
+        remainder: str,
+        amount_pattern: re.Pattern,
+        filter_foreign_currency: bool = False
+    ) -> tuple:
+        """
+        Extract amounts from date line remainder (Layout A pattern).
+
+        When using pdftotext -layout, some banks format transactions with
+        all data on one line after the date prefix:
+
+        "16/08/202        MERCHANT NAME        -93.58        6.98"
+
+        This is referred to as "Layout A" (vs "Layout B" where description
+        and amounts are on separate lines). This method extracts amounts
+        from the remainder and returns a cleaned description.
+
+        Args:
+            remainder: Text after date prefix on the same line
+            amount_pattern: Compiled regex for matching amounts
+            filter_foreign_currency: If True, apply FX amount filtering
+
+        Returns:
+            Tuple of (amounts_list, cleaned_description)
+            - amounts_list: List of amount strings found
+            - cleaned_description: Remainder with amounts removed
+
+        Example - Normal transaction:
+            >>> remainder = "TESCO STORES 2341      -45.67      1254.33"
+            >>> amounts, desc = self._extract_amounts_from_remainder(remainder, pattern)
+            >>> print(amounts)  # ['-45.67', '1254.33']
+            >>> print(desc)     # "TESCO STORES 2341"
+
+        Example - FX transaction with filtering:
+            >>> remainder = "Amount: EUR 109.50. Conversion  -93.58  6.98"
+            >>> amounts, desc = self._extract_amounts_from_remainder(remainder, pattern, True)
+            >>> print(amounts)  # ['-93.58', '6.98']  (EUR filtered out)
+            >>> print(desc)     # "Amount: EUR 109.50. Conversion"
+
+        See Also:
+            - Monzo parser: Uses this extensively for Layout A transactions
+            - _filter_foreign_currency_amounts(): Called when filter_foreign_currency=True
+        """
+        # Extract amounts, applying foreign currency filter if requested
+        if filter_foreign_currency:
+            amounts = self._filter_foreign_currency_amounts(remainder, amount_pattern)
+        else:
+            amounts = amount_pattern.findall(remainder)
+
+        # Remove amounts from description text
+        # Replace each amount with space to preserve word separation
+        desc_part = remainder
+        for amt in amounts:
+            desc_part = desc_part.replace(amt, ' ', 1)  # Replace only first occurrence
+
+        return amounts, desc_part.strip()

@@ -62,7 +62,13 @@ class NatWestParser(BaseTransactionParser):
         amount_line_pattern = re.compile(r'.*\s+([\d,]+\.\d{2})(?:\s+([\d,]+\.\d{2}))?(?:\s+(?:OD|CR|DB))?\s*$', re.IGNORECASE)
 
         # Pattern for table header (to detect column positions dynamically)
-        header_pattern = re.compile(r'Date\s+(Description|Details).*(Paid In.*Withdrawn|Withdrawn.*Paid In).*Balance', re.IGNORECASE)
+        # Handles two formats:
+        # Format 1: "Date Description ... Paid In ... Withdrawn ... Balance"
+        # Format 2: "Date Type Description ... Paid in ... Paid out ... Balance"
+        header_pattern = re.compile(
+            r'Date\s+(?:Type\s+)?(Description|Details).*(Paid\s+[Ii]n.*(Withdrawn|Paid\s+out)|Withdrawn.*Paid\s+[Ii]n).*Balance',
+            re.IGNORECASE
+        )
 
         # Dynamic column thresholds (will be updated when we find headers)
         PAID_IN_THRESHOLD = 73  # Default from first page
@@ -77,6 +83,19 @@ class NatWestParser(BaseTransactionParser):
         # Find table header to determine start position
         header_line_idx = self._find_natwest_header(lines)
         start_idx = (header_line_idx + 1) if header_line_idx is not None else 0
+
+        # Detect format variant by checking if header has "Type" column
+        # Format A (old): "Date Description ... Paid In ... Withdrawn ... Balance"
+        # Format B (new): "Date Type Description ... Paid in ... Paid out ... Balance"
+        has_type_column = False
+        if header_line_idx is not None:
+            header_line = lines[header_line_idx]
+            has_type_column = bool(re.search(r'Date\s+Type\s+Description', header_line, re.IGNORECASE))
+            logger.info(f"NatWest format variant: {'B (with Type column)' if has_type_column else 'A (without Type column)'}")
+
+        # For Format B, use HSBC-style parsing (dates and amounts on same line)
+        if has_type_column:
+            return self._parse_format_b(lines, start_idx, statement_start_date, statement_end_date)
 
         idx = start_idx
         while idx < len(lines):
@@ -93,8 +112,9 @@ class NatWestParser(BaseTransactionParser):
             # Check for table header (update column thresholds dynamically)
             if header_pattern.search(line):
                 # Extract column positions from header
-                paid_in_match = re.search(r'Paid In', line, re.IGNORECASE)
-                withdrawn_match = re.search(r'Withdrawn', line, re.IGNORECASE)
+                # Try both "Paid In" and "Paid in", "Withdrawn" and "Paid out"
+                paid_in_match = re.search(r'Paid\s+[Ii]n', line, re.IGNORECASE)
+                withdrawn_match = re.search(r'Withdrawn|Paid\s+out', line, re.IGNORECASE)
                 balance_match = re.search(r'Balance', line, re.IGNORECASE)
 
                 if paid_in_match and withdrawn_match and balance_match:
@@ -105,15 +125,15 @@ class NatWestParser(BaseTransactionParser):
                     # Calculate thresholds (mid-points between columns)
                     # Handle both column orders
                     if withdrawn_start < paid_in_start:
-                        # Order: Withdrawn, Paid In, Balance
+                        # Order: Withdrawn/Paid out, Paid in, Balance
                         WITHDRAWN_THRESHOLD = (withdrawn_start + paid_in_start) // 2
                         PAID_IN_THRESHOLD = (paid_in_start + balance_start) // 2
                     else:
-                        # Order: Paid In, Withdrawn, Balance
+                        # Order: Paid in, Withdrawn/Paid out, Balance
                         PAID_IN_THRESHOLD = (paid_in_start + withdrawn_start) // 2
                         WITHDRAWN_THRESHOLD = (withdrawn_start + balance_start) // 2
 
-                    logger.debug(f"Updated NatWest column thresholds: Withdrawn={WITHDRAWN_THRESHOLD}, Paid In={PAID_IN_THRESHOLD}")
+                    logger.debug(f"Updated NatWest column thresholds: Withdrawn/Out={WITHDRAWN_THRESHOLD}, Paid In={PAID_IN_THRESHOLD}")
 
                 idx += 1
                 continue
@@ -185,7 +205,8 @@ class NatWestParser(BaseTransactionParser):
                                 transaction.balance = calculated_balance
 
                         # BALANCE VALIDATION: Auto-correct money_in/money_out direction
-                        if transaction.balance > 0 and len(transactions) > 0 and not is_current_bf:
+                        # Note: Changed from 'balance > 0' to 'balance is not None' to handle zero/OD balances
+                        if transaction.balance is not None and len(transactions) > 0 and not is_current_bf:
                             prev_transaction = transactions[-1]
                             prev_balance = prev_transaction.balance
                             balance_change = transaction.balance - prev_balance
@@ -228,9 +249,253 @@ class NatWestParser(BaseTransactionParser):
         logger.info(f"Successfully parsed {len(transactions)} NatWest transactions")
         return transactions
 
+    def _parse_format_b(
+        self,
+        lines: List[str],
+        start_idx: int,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> List[Transaction]:
+        """
+        Parse NatWest Format B (with Type column).
+
+        Format B structure:
+        - Date on left (applies to multiple transactions)
+        - Type in middle-left (e.g., "DEBIT CARD TRANSACTION", "AUTOMATED CREDIT")
+        - Description spans multiple lines
+        - Amounts on far right (Paid in, Paid out, Balance)
+
+        Similar to HSBC format.
+        """
+        transactions = []
+        current_date = None
+        current_type = None
+        description_lines = []
+
+        # Patterns
+        # Note: Allow leading whitespace for dates
+        date_pattern = re.compile(r'^\s*(\d{1,2}\s+\w+\s+\d{2,4})\s+')
+        # Amount pattern: optionally captures minus sign for overdraft balances (e.g., £-450.51)
+        amount_pattern = re.compile(r'(-?[\d,]+\.\d{2})')
+        header_pattern = re.compile(r'Date\s+Type\s+Description.*Paid\s+in.*Paid\s+out.*Balance', re.IGNORECASE)
+
+        # Type pattern - known types from the format
+        # Supports both long names and short codes (POS, BAC, D/D, C/L, etc.)
+        type_pattern = re.compile(
+            r'^\s{10,30}(DEBIT CARD TRANSACTION|AUTOMATED CREDIT|ATM TRANSACTION|DIRECT DEBIT|STANDING ORDER|FASTER PAYMENT|POS|BAC|D/D|C/L|FP|SO|ATM)',
+            re.IGNORECASE
+        )
+
+        # Column thresholds (will be updated from header)
+        PAID_IN_THRESHOLD = 128  # Midpoint between 118 and 139
+        PAID_OUT_THRESHOLD = 151  # Midpoint between 139 and 163
+
+        # Pre-scan to find header and set column thresholds
+        for i in range(max(0, start_idx - 5), min(start_idx + 5, len(lines))):
+            line = lines[i]
+            if header_pattern.search(line):
+                paid_in_match = re.search(r'Paid\s+in', line, re.IGNORECASE)
+                paid_out_match = re.search(r'Paid\s+out', line, re.IGNORECASE)
+                balance_match = re.search(r'Balance', line, re.IGNORECASE)
+
+                if paid_in_match and paid_out_match and balance_match:
+                    PAID_IN_THRESHOLD = (paid_in_match.start() + paid_out_match.start()) // 2
+                    PAID_OUT_THRESHOLD = (paid_out_match.start() + balance_match.start()) // 2
+                    logger.debug(f"Format B thresholds from header at line {i}: Paid In={PAID_IN_THRESHOLD}, Paid Out={PAID_OUT_THRESHOLD}")
+                    break
+
+        idx = start_idx
+        while idx < len(lines):
+            line = lines[idx]
+
+            # Skip blank lines
+            if not line.strip():
+                idx += 1
+                continue
+
+            # Skip footers
+            if re.search(r'National Westminster Bank|Registered|Authorised|downloaded from', line, re.IGNORECASE):
+                idx += 1
+                continue
+
+            # Update column thresholds if we hit a header
+            if header_pattern.search(line):
+                paid_in_match = re.search(r'Paid\s+in', line, re.IGNORECASE)
+                paid_out_match = re.search(r'Paid\s+out', line, re.IGNORECASE)
+                balance_match = re.search(r'Balance', line, re.IGNORECASE)
+
+                if paid_in_match and paid_out_match and balance_match:
+                    PAID_IN_THRESHOLD = (paid_in_match.start() + paid_out_match.start()) // 2
+                    PAID_OUT_THRESHOLD = (paid_out_match.start() + balance_match.start()) // 2
+                    print(f"[DEBUG] Updated Format B thresholds: PAID_IN={PAID_IN_THRESHOLD}, PAID_OUT={PAID_OUT_THRESHOLD}")
+                    logger.debug(f"Format B thresholds: Paid In={PAID_IN_THRESHOLD}, Paid Out={PAID_OUT_THRESHOLD}")
+
+                idx += 1
+                continue
+
+            # Check for date
+            date_match = date_pattern.match(line)
+            if date_match:
+                current_date_str = date_match.group(1)
+                if statement_start_date and statement_end_date:
+                    current_date = infer_year_from_period(
+                        current_date_str,
+                        statement_start_date,
+                        statement_end_date
+                    )
+                else:
+                    current_date = parse_date(current_date_str, self.config.date_formats)
+
+                logger.debug(f"Found date: {current_date}")
+
+            # Check for type
+            type_match = type_pattern.match(line)
+            if type_match:
+                current_type = type_match.group(1)
+                logger.debug(f"Found type: {current_type}")
+
+            # Check if line has amounts (indicates transaction line)
+            amounts_with_pos = []
+            # Use Paid In column start minus a buffer as minimum position
+            # Need to allow for amounts slightly left of the threshold due to PDF alignment
+            MIN_AMOUNT_POSITION = max(PAID_IN_THRESHOLD - 15, 60)  # Amounts in description are before this position
+            for match in amount_pattern.finditer(line):
+                amt_str = match.group(1)
+                pos = match.start()
+                if pos >= MIN_AMOUNT_POSITION:
+                    amounts_with_pos.append((amt_str, pos))
+                else:
+                    logger.debug(f"Ignoring amount {amt_str} at position {pos} - likely in description")
+
+            if amounts_with_pos and current_date:
+                # This line completes a transaction
+                # Extract description part (everything before first amount)
+                first_amount_pos = amounts_with_pos[0][1]
+                desc_part = line[:first_amount_pos].strip()
+
+                # Remove date and type from description
+                desc_part = re.sub(r'^\d{1,2}\s+\w+\s+\d{2,4}\s*', '', desc_part)
+                desc_part = re.sub(r'^\s*(DEBIT CARD TRANSACTION|AUTOMATED CREDIT|ATM TRANSACTION|DIRECT DEBIT|STANDING ORDER|FASTER PAYMENT)\s*', '', desc_part, flags=re.IGNORECASE)
+
+                if desc_part:
+                    description_lines.append(desc_part)
+
+                full_description = ' '.join(description_lines).strip()
+
+                # Parse amounts by count (more reliable than position due to PDF alignment issues)
+                # Typical patterns:
+                # - 2 amounts: [paid_out, balance] or [paid_in, balance]
+                # - 3 amounts: [paid_in, paid_out, balance]
+                money_in = 0.0
+                money_out = 0.0
+                balance = None
+
+                num_amounts = len(amounts_with_pos)
+
+                if num_amounts == 1:
+                    # Only one amount - must be balance
+                    amt_val = parse_currency(amounts_with_pos[0][0]) or 0.0
+                    balance = amt_val
+                elif num_amounts == 2:
+                    # Two amounts - last is always balance, first is paid in or paid out
+                    # Use '-' character to determine which column is empty
+                    first_amt_str, first_pos = amounts_with_pos[0]
+                    second_amt_str, second_pos = amounts_with_pos[1]
+
+                    first_val = abs(parse_currency(first_amt_str) or 0.0)
+                    balance = parse_currency(second_amt_str) or 0.0
+
+                    # Check where the '-' dash is relative to the first amount
+                    # Pattern 1: "- £amount1 £amount2" → dash before first amount → amount1 is Money Out
+                    # Pattern 2: "£amount1 - £amount2" → dash after first amount → amount1 is Money In
+
+                    # Look for standalone dash before first amount
+                    # Check if there's a dash in the column area (position > 60) before the first amount
+                    # This avoids matching dashes in descriptions (which are typically before position 60)
+                    text_before_first = line[:first_pos]
+
+                    # Find the last dash before the first amount
+                    dash_matches = list(re.finditer(r'\s-\s', text_before_first))
+                    if dash_matches:
+                        last_dash = dash_matches[-1]
+                        # Check if this dash is in the column area (position > 55)
+                        dash_before = last_dash.start() > 55
+                    else:
+                        dash_before = False
+
+                    if dash_before:
+                        # Dash is BEFORE first amount → Paid In is empty → first amount is Money Out
+                        money_out = first_val
+                    else:
+                        # Dash must be AFTER first amount (between amounts) → Paid Out is empty → first amount is Money In
+                        money_in = first_val
+                elif num_amounts >= 3:
+                    # Three or more amounts: first is paid in, second is paid out, last is balance
+                    money_in = abs(parse_currency(amounts_with_pos[0][0]) or 0.0)
+                    money_out = abs(parse_currency(amounts_with_pos[1][0]) or 0.0)
+                    balance = parse_currency(amounts_with_pos[-1][0]) or 0.0
+
+                # If no balance, calculate from previous
+                if balance is None and transactions:
+                    prev_balance = transactions[-1].balance
+                    balance = prev_balance + money_in - money_out
+
+                # Create transaction
+                if current_date and balance is not None:
+                    transaction_type = self._detect_transaction_type(full_description) or current_type
+
+                    confidence = self._calculate_confidence(
+                        date=current_date,
+                        description=full_description,
+                        money_in=money_in,
+                        money_out=money_out,
+                        balance=balance
+                    )
+
+                    transaction = Transaction(
+                        date=current_date,
+                        description=full_description,
+                        money_in=money_in,
+                        money_out=money_out,
+                        balance=balance,
+                        transaction_type=transaction_type,
+                        confidence=confidence,
+                        raw_text=line[:100]
+                    )
+                    transactions.append(transaction)
+                    logger.debug(f"Parsed: {current_date} {full_description[:30]} In:£{money_in:.2f} Out:£{money_out:.2f} Bal:£{balance:.2f}")
+
+                # Reset for next transaction
+                description_lines = []
+                current_type = None
+
+                idx += 1
+                continue
+
+            # Otherwise, this is a description continuation line
+            if line.strip() and not type_match:
+                description_lines.append(line.strip())
+
+            idx += 1
+
+        # Check if transactions are in reverse chronological order (newest first)
+        # Some NatWest Format B statements (like online statements) are in reverse order
+        if len(transactions) >= 2:
+            first_date = transactions[0].date
+            last_date = transactions[-1].date
+            if first_date > last_date:
+                logger.info(f"Transactions are in reverse chronological order - reversing to chronological order")
+                transactions.reverse()
+
+        logger.info(f"Successfully parsed {len(transactions)} NatWest Format B transactions")
+        return transactions
+
     def _find_natwest_header(self, lines: List[str]) -> Optional[int]:
         """Find the NatWest transaction table header."""
-        header_pattern = re.compile(r'Date\s+(Description|Details).*(Paid In.*Withdrawn|Withdrawn.*Paid In).*Balance', re.IGNORECASE)
+        header_pattern = re.compile(
+            r'Date\s+(?:Type\s+)?(Description|Details).*(Paid\s+[Ii]n.*(Withdrawn|Paid\s+out)|Withdrawn.*Paid\s+[Ii]n).*Balance',
+            re.IGNORECASE
+        )
 
         for idx, line in enumerate(lines):
             if header_pattern.search(line):

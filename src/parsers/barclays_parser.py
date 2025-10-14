@@ -65,39 +65,35 @@ class BarclaysParser(BaseTransactionParser):
         # Header pattern
         header_pattern = re.compile(r'Date\s+Description\s+Money out\s+Money in\s+Balance', re.IGNORECASE)
 
-        # Find header to get column positions
+        # Dynamic column thresholds (will be updated when headers are found)
+        MONEY_OUT_THRESHOLD = 75  # Default from typical layout
+        MONEY_IN_THRESHOLD = 95   # Default from typical layout
+
+        # PRE-SCAN: Find first header to set correct thresholds before processing
+        # This fixes issues where column positions vary across pages
         header_line_idx = None
         for idx, line in enumerate(lines):
             if header_pattern.search(line):
                 header_line_idx = idx
-                logger.debug(f"Found Barclays header at line {idx}")
-                break
+                money_out_match = re.search(r'Money out', line)
+                money_in_match = re.search(r'Money in', line)
+                balance_match = re.search(r'Balance', line)
+
+                if money_out_match and money_in_match and balance_match:
+                    money_out_start = money_out_match.start()
+                    money_in_start = money_in_match.start()
+                    balance_start = balance_match.start()
+
+                    # Calculate thresholds (midpoints between columns)
+                    MONEY_OUT_THRESHOLD = (money_out_start + money_in_start) // 2
+                    MONEY_IN_THRESHOLD = (money_in_start + balance_start) // 2
+
+                    logger.info(f"Pre-scan: Set Barclays column thresholds: money_out={MONEY_OUT_THRESHOLD}, money_in={MONEY_IN_THRESHOLD}")
+                    break  # Use first header found
 
         if header_line_idx is None:
             logger.warning("Could not find Barclays transaction table header")
             return transactions
-
-        # Extract column positions from header
-        header_line = lines[header_line_idx]
-        money_out_match = re.search(r'Money out', header_line)
-        money_in_match = re.search(r'Money in', header_line)
-        balance_match = re.search(r'Balance', header_line)
-
-        if not (money_out_match and money_in_match and balance_match):
-            logger.warning("Could not determine Barclays column positions")
-            return transactions
-
-        money_out_start = money_out_match.start()
-        money_in_start = money_in_match.start()
-        balance_start = balance_match.start()
-
-        # Calculate thresholds (midpoints between columns)
-        # NOTE: Amounts are right-aligned, so we need to account for this
-        # Use midpoint as threshold, but check amount START position (not end)
-        MONEY_OUT_THRESHOLD = (money_out_start + money_in_start) // 2
-        MONEY_IN_THRESHOLD = (money_in_start + balance_start) // 2
-
-        logger.info(f"Barclays column thresholds: money_out={MONEY_OUT_THRESHOLD}, money_in={MONEY_IN_THRESHOLD}")
 
         # Date pattern: "DD MMM" or "DD MMM YYYY" at start of line
         # This prevents matching addresses like "5 SWEDEN PLACE"
@@ -130,10 +126,26 @@ class BarclaysParser(BaseTransactionParser):
             if "Start balance" in line and not re.match(r'^\d{1,2}\s+[A-Z][a-z]{2}', line):
                 continue
 
-            # Check if we've hit another header row (indicates end of current period)
-            # This prevents accumulating page footers and next page headers into transactions
+            # Check if we've hit another header row (indicates new page/section)
+            # IMPORTANT: Update column thresholds dynamically for this page
             if header_pattern.search(line):
-                logger.debug(f"Found header at line {idx}, saving current transaction and resetting")
+                logger.debug(f"Found header at line {idx}, updating column positions and saving current transaction")
+
+                # Update column thresholds for this page
+                money_out_match = re.search(r'Money out', line)
+                money_in_match = re.search(r'Money in', line)
+                balance_match = re.search(r'Balance', line)
+
+                if money_out_match and money_in_match and balance_match:
+                    money_out_start = money_out_match.start()
+                    money_in_start = money_in_match.start()
+                    balance_start = balance_match.start()
+
+                    MONEY_OUT_THRESHOLD = (money_out_start + money_in_start) // 2
+                    MONEY_IN_THRESHOLD = (money_in_start + balance_start) // 2
+
+                    logger.debug(f"Updated Barclays column thresholds for this page: money_out={MONEY_OUT_THRESHOLD}, money_in={MONEY_IN_THRESHOLD}")
+
                 # Save current transaction if any
                 if current_description_lines and current_transaction_amounts:
                     transaction = self._build_barclays_transaction(
@@ -156,9 +168,24 @@ class BarclaysParser(BaseTransactionParser):
             # Check if this line has a date
             date_match = date_pattern.match(line)
 
-            # Skip "End balance" transactions (these are summary lines, not real transactions)
-            if date_match and re.search(r'End balance', line, re.IGNORECASE):
-                logger.debug(f"Skipping 'End balance' summary line: {line[:60]}")
+            # Skip summary/footer lines that have balances but aren't real transactions
+            footer_patterns = [
+                r'End balance',
+                r'^\s+Money in\s',  # "Money in" summary line
+                r'^\s+Money out\s',  # "Money out" summary line
+                r'Instant Cash ISA',
+                r'other accounts you have',
+                r'Balance forward',
+                r'^\s+Barclays Bank',
+                r'Statement of Account',
+            ]
+            is_footer = False
+            for pattern in footer_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    logger.debug(f"Skipping footer/summary line: {line[:60]}")
+                    is_footer = True
+                    break
+            if is_footer:
                 continue
 
             # Check if this is the start of a new transaction description
@@ -226,46 +253,64 @@ class BarclaysParser(BaseTransactionParser):
             # Otherwise, check if this is a valid continuation line
             else:
                 if current_date_str:
-                    # STRICT validation: Only accept specific continuation patterns
-                    # This prevents accumulating page footers and bank information
+                    # Special case: If line has amounts, complete current transaction and start new one
+                    # This handles cases like "Park Xmas Savgs £110.00 £93.44" that don't match transaction_start_pattern
+                    if amounts_with_pos:
+                        # Save current transaction
+                        if current_description_lines and current_transaction_amounts:
+                            transaction = self._build_barclays_transaction(
+                                current_date_str,
+                                current_description_lines,
+                                current_transaction_amounts,
+                                MONEY_OUT_THRESHOLD,
+                                MONEY_IN_THRESHOLD,
+                                statement_start_date,
+                                statement_end_date
+                            )
+                            if transaction:
+                                transactions.append(transaction)
 
-                    # Valid continuation patterns
-                    valid_continuation_patterns = [
-                        r'^\s{10,}On \d{1,2} [A-Z][a-z]{2}',  # "On XX Xxx" date reference
-                        r'^\s{10,}Ref:',  # "Ref: XXX" reference
-                        r'^\s{10,}Account \d+',  # "Account XXXXXXXX" account number
-                        r'^\s{10,}Timed at',  # "Timed at XX.XX" for cash machine withdrawals
-                    ]
+                        # Start new transaction with same date
+                        current_description_lines = [line]
+                        current_transaction_amounts = amounts_with_pos
 
-                    is_valid_continuation = False
-                    for pattern in valid_continuation_patterns:
-                        if re.search(pattern, line, re.IGNORECASE):
-                            is_valid_continuation = True
-                            break
+                    # Otherwise, check continuation patterns
+                    else:
+                        # STRICT validation: Only accept specific continuation patterns
+                        # This prevents accumulating page footers and bank information
 
-                    # Special case: bare date line (e.g., "12 Dec") for Refund From transactions
-                    # Only treat as continuation if current transaction is Refund From
-                    bare_date_match = re.match(r'^\s{10,}(\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?)$', line, re.IGNORECASE)
-                    if bare_date_match and current_description_lines:
-                        first_line = current_description_lines[0]
-                        if 'Refund From' in first_line:
-                            # This is the date for the Refund From transaction
-                            current_date_str = bare_date_match.group(1)
-                            logger.debug(f"Updated Refund From transaction date: {current_date_str}")
-                            is_valid_continuation = True  # Mark as valid so we don't skip
+                        # Valid continuation patterns (for lines WITHOUT amounts)
+                        valid_continuation_patterns = [
+                            r'^\s{10,}On \d{1,2} [A-Z][a-z]{2}',  # "On XX Xxx" date reference
+                            r'^\s{10,}Ref:',  # "Ref: XXX" reference
+                            r'^\s{10,}Account \d+',  # "Account XXXXXXXX" account number
+                            r'^\s{10,}Timed at',  # "Timed at XX.XX" for cash machine withdrawals
+                            r'^\s{10,}Unpaid',  # "Unpaid Direct Debit" or similar
+                            r'^\s{10,}This Is A New',  # "This Is A New Direct Debit Payment"
+                        ]
 
-                    if is_valid_continuation:
-                        # Only accumulate non-date lines
-                        if not bare_date_match:
-                            # Debug: Log if continuation line adds amounts
-                            if amounts_with_pos:
-                                desc_preview = ' '.join(current_description_lines)[:40]
-                                amounts_str = ', '.join([f"{amt}@{pos}" for amt, pos in amounts_with_pos])
-                                logger.debug(f"Continuation line adds amounts: {amounts_str} to transaction: {desc_preview}")
+                        is_valid_continuation = False
+                        for pattern in valid_continuation_patterns:
+                            if re.search(pattern, line, re.IGNORECASE):
+                                is_valid_continuation = True
+                                break
 
-                            current_description_lines.append(line)
-                            current_transaction_amounts.extend(amounts_with_pos)
-                    # else: silently skip invalid continuation lines
+                        # Special case: bare date line (e.g., "12 Dec") for Refund From transactions
+                        # Only treat as continuation if current transaction is Refund From
+                        bare_date_match = re.match(r'^\s{10,}(\d{1,2} [A-Z][a-z]{2}(?:\s+\d{4})?)$', line, re.IGNORECASE)
+                        if bare_date_match and current_description_lines:
+                            first_line = current_description_lines[0]
+                            if 'Refund From' in first_line:
+                                # This is the date for the Refund From transaction
+                                current_date_str = bare_date_match.group(1)
+                                logger.debug(f"Updated Refund From transaction date: {current_date_str}")
+                                is_valid_continuation = True  # Mark as valid so we don't skip
+
+                        if is_valid_continuation:
+                            # Only accumulate non-date lines
+                            if not bare_date_match:
+                                current_description_lines.append(line)
+                        # else: silently skip invalid continuation lines
 
         # Handle final transaction
         if current_description_lines and current_transaction_amounts:
