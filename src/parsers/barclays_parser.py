@@ -99,8 +99,8 @@ class BarclaysParser(BaseTransactionParser):
         # This prevents matching addresses like "5 SWEDEN PLACE"
         date_pattern = re.compile(r'^(\d{1,2}\s+[A-Z][a-z]{2}(?:\s+\d{4})?)(?:\s|$)', re.IGNORECASE)
 
-        # Amount pattern: decimal number with optional commas
-        amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+        # Amount pattern: decimal number with optional commas and optional negative sign
+        amount_pattern = re.compile(r'(-?[\d,]+\.\d{2})')
 
         # Transaction start pattern: description starting around column 13
         # Typical: "             Card Payment to..." or "             Direct Debit to..."

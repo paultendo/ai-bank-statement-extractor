@@ -130,12 +130,23 @@ class ExtractionPipeline:
             # When statement only has a single date (not a period range), infer the range from transactions
             if statement.statement_start_date == statement.statement_end_date and transactions:
                 sorted_txns = sorted(transactions, key=lambda t: t.date)
-                actual_start = sorted_txns[0].date
+
+                # Check for BROUGHT FORWARD transaction (marks official statement start)
+                brought_forward_txn = None
+                for txn in sorted_txns:
+                    if "BROUGHT FORWARD" in txn.description.upper() or "START BALANCE" in txn.description.upper():
+                        brought_forward_txn = txn
+                        break
+
+                # Use BROUGHT FORWARD date as start if present, otherwise use earliest transaction
+                actual_start = brought_forward_txn.date if brought_forward_txn else sorted_txns[0].date
                 actual_end = sorted_txns[-1].date
 
                 logger.info(f"Refining statement period from transactions:")
                 logger.info(f"  Original: {statement.statement_start_date.date()} to {statement.statement_end_date.date()}")
                 logger.info(f"  Refined: {actual_start.date()} to {actual_end.date()}")
+                if brought_forward_txn:
+                    logger.info(f"  (Using BROUGHT FORWARD transaction date as start)")
 
                 statement.statement_start_date = actual_start
                 statement.statement_end_date = actual_end
@@ -145,15 +156,30 @@ class ExtractionPipeline:
             if statement.opening_balance == 0.0 and statement.closing_balance == 0.0 and transactions:
                 sorted_txns = sorted(transactions, key=lambda t: t.date)
 
-                # Calculate opening balance from first transaction
-                first_txn = sorted_txns[0]
-                calculated_opening = first_txn.balance - first_txn.money_in + first_txn.money_out
+                # Check for BROUGHT FORWARD transaction (authoritative opening balance)
+                brought_forward_txn = None
+                for txn in sorted_txns:
+                    if "BROUGHT FORWARD" in txn.description.upper() or "START BALANCE" in txn.description.upper():
+                        brought_forward_txn = txn
+                        break
+
+                # Calculate opening balance
+                if brought_forward_txn:
+                    # Use BROUGHT FORWARD balance as the authoritative opening balance
+                    calculated_opening = brought_forward_txn.balance
+                    opening_date = brought_forward_txn.date
+                    logger.info(f"Using BROUGHT FORWARD transaction for opening balance")
+                else:
+                    # Calculate from first transaction (backward from its balance)
+                    first_txn = sorted_txns[0]
+                    calculated_opening = first_txn.balance - first_txn.money_in + first_txn.money_out
+                    opening_date = first_txn.date
 
                 # Use last transaction's balance as closing
                 calculated_closing = sorted_txns[-1].balance
 
                 logger.info(f"Calculating statement balances from transactions:")
-                logger.info(f"  Opening: £0.00 → £{calculated_opening:.2f} (from {first_txn.date.date()})")
+                logger.info(f"  Opening: £0.00 → £{calculated_opening:.2f} (from {opening_date.date()})")
                 logger.info(f"  Closing: £0.00 → £{calculated_closing:.2f} (from {sorted_txns[-1].date.date()})")
 
                 statement.opening_balance = calculated_opening

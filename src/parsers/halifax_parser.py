@@ -65,11 +65,15 @@ class HalifaxParser(BaseTransactionParser):
             r'(\d{2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})\s+to\s+(\d{2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})'
         )
 
-        # Pattern for Halifax transaction line
-        # Format: Date  Description  Type  [amounts...]  Balance
-        # Capture the full line to preserve column positions
-        transaction_pattern = re.compile(
-            r'^(\d{2}\s+\w+\s+\d{2})\s{2,}(.+?)\s{2,}([A-Z]{2,4})(.+?)(-?[\d,]+\.\d{2})\s*$'
+        # Halifax has TWO different line formats that can appear in the same statement:
+        # Format A: "Date   Type     Description   [amounts]  Balance"  (Type immediately after date)
+        # Format B: "Date   Description   Type   [amounts]  Balance"    (Description between date and type)
+        # We try Format A first, then fall back to Format B
+        pattern_a = re.compile(
+            r'^(\d{2}\s+\w+\s+\d{2})\s+([A-Z]{2,4})\s+(.+?)(-?[\d,]+\.\d{2})\s*$'
+        )
+        pattern_b = re.compile(
+            r'^(\d{2}\s+\w+\s+\d{2})\s+(.+?)\s{2,}([A-Z]{2,4})\s+(.+?)(-?[\d,]+\.\d{2})\s*$'
         )
 
         current_period_start = None
@@ -102,17 +106,54 @@ class HalifaxParser(BaseTransactionParser):
                 found_page_one = False  # Reset flag
                 continue
 
-            # Try to match transaction pattern
-            match = transaction_pattern.search(line)
-            if not match:
+            # Try to match transaction pattern (try Format A first, then Format B)
+            match_a = pattern_a.search(line)
+            match_b = pattern_b.search(line)
+
+            # Determine which pattern matched
+            if match_a:
+                # Format A: Date Type Description [amounts] Balance
+                match = match_a
+                date_str = match.group(1)
+                type_code = match.group(2)
+                desc_and_amounts_text = match.group(3)
+                balance_str = match.group(4)
+                format_used = 'A'
+            elif match_b:
+                # Format B: Date Description Type [amounts] Balance
+                match = match_b
+                date_str = match.group(1)
+                description_raw = match.group(2).strip()
+                type_code = match.group(3)
+                amounts_text_raw = match.group(4)
+                balance_str = match.group(5)
+                format_used = 'B'
+            else:
+                # No match
                 continue
 
             try:
-                date_str = match.group(1)  # "01 Aug 24"
-                description = match.group(2).strip()  # "BRITISH GAS"
-                type_code = match.group(3)  # "DD"
-                amounts_text = match.group(4)  # Everything between Type and Balance
-                balance_str = match.group(5)  # "-431.69"
+                # Handle Format A parsing (need to split desc from amounts)
+                if format_used == 'A':
+                    # Extract description and amounts from the combined text
+                    # Use negative lookbehind to avoid matching amounts embedded in alphanumeric strings
+                    # E.g., "AE12.48" should not match, but " 12.48" should
+                    amount_pattern_temp = re.compile(r'(?<![A-Z\d])([\d,]+\.\d{2})')
+                    first_amount_match = amount_pattern_temp.search(desc_and_amounts_text)
+
+                    if first_amount_match:
+                        # Description is everything before the first amount
+                        description = desc_and_amounts_text[:first_amount_match.start()].strip()
+                        # Amounts text is from first amount onwards
+                        amounts_text = desc_and_amounts_text[first_amount_match.start():]
+                    else:
+                        # No amounts found - use whole text as description
+                        description = desc_and_amounts_text.strip()
+                        amounts_text = ""
+                else:
+                    # Format B - description already extracted
+                    description = description_raw
+                    amounts_text = amounts_text_raw
 
                 # Parse date with year inference using current period if available
                 if current_period_start and current_period_end:
@@ -146,7 +187,7 @@ class HalifaxParser(BaseTransactionParser):
                     amount_val = parse_currency(amounts[0]) or 0.0
                     amount_pos_in_line = line.find(amounts[0])
 
-                    # HYBRID APPROACH: Use type code + position for better accuracy
+                    # HYBRID APPROACH: Use type code + balance validation for accuracy
                     # Some Halifax PDFs have inconsistent column alignment between pages
 
                     # First check if type code gives us a clear answer
@@ -157,18 +198,29 @@ class HalifaxParser(BaseTransactionParser):
                         # Type codes that are ALWAYS money out
                         money_out = amount_val
                     else:
-                        # Ambiguous type codes (like DEB) - use relative position from balance
-                        # The balance is always the last amount in the line
-                        balance_pos = line.rfind(balance_str)
-                        distance_from_balance = balance_pos - amount_pos_in_line
+                        # Ambiguous type codes (DEB, TFR) - use balance change if we have a previous transaction
+                        # This is more reliable than column position which varies by statement format
+                        if len(transactions) > 0:
+                            prev_balance = transactions[-1].balance
+                            balance_change = balance - prev_balance
 
-                        # Money In is typically 50-60 chars before balance
-                        # Money Out is typically 20-30 chars before balance
-                        # Use 40 as threshold
-                        if distance_from_balance > 40:
-                            money_in = amount_val
+                            # If balance went up, it's money in; if down, it's money out
+                            if balance_change > 0:
+                                money_in = amount_val
+                            else:
+                                money_out = amount_val
                         else:
-                            money_out = amount_val
+                            # No previous transaction to validate against
+                            # Fall back to position-based detection (unreliable but best we can do)
+                            balance_pos = line.rfind(balance_str)
+                            distance_from_balance = balance_pos - amount_pos_in_line
+
+                            # Money In is typically further from balance than Money Out
+                            # Use 40 as threshold (works for Statements 4 format)
+                            if distance_from_balance > 40:
+                                money_in = amount_val
+                            else:
+                                money_out = amount_val
                 elif len(amounts) == 2:
                     # Two amounts: first is Money In, second is Money Out
                     money_in = parse_currency(amounts[0]) or 0.0
@@ -180,18 +232,17 @@ class HalifaxParser(BaseTransactionParser):
                     money_in = parse_currency(amounts[0]) or 0.0
                     money_out = parse_currency(amounts[-1]) or 0.0
 
-                # VALIDATE DIRECTION: Use balance change as source of truth
-                # If we have a previous transaction, verify the direction makes sense
-                if len(transactions) > 0:
+                # VALIDATE DIRECTION: For type codes we're confident about, skip validation
+                # For ambiguous ones, we already validated during classification
+                # But for 2-amount lines, we should still validate
+                if len(amounts) == 2 and len(transactions) > 0:
                     prev_balance = transactions[-1].balance
                     balance_change = balance - prev_balance
-
-                    # Check if our classification matches the balance change
                     calculated_change = money_in - money_out
 
                     if abs(calculated_change - balance_change) > 0.01:
                         # Direction is wrong! Swap IN and OUT
-                        logger.debug(f"Correcting direction for {description[:30]}: balance change {balance_change:.2f} != calculated {calculated_change:.2f}")
+                        logger.debug(f"Correcting 2-amount line for {description[:30]}: balance change {balance_change:.2f} != calculated {calculated_change:.2f}")
                         money_in, money_out = money_out, money_in
 
                 # If this is the first transaction in a new period, insert BROUGHT FORWARD

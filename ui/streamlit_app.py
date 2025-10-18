@@ -186,46 +186,210 @@ def main():
         """)
 
     # Main content
+    # Upload mode selector
+    upload_mode = st.radio(
+        "Upload Mode",
+        ["Single Statement", "Batch Upload (Multiple Files)"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
+
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        st.markdown("### 📤 Upload Statement")
-        uploaded_file = st.file_uploader(
-            "Drag and drop or browse",
-            type=['pdf', 'png', 'jpg', 'jpeg'],
-            label_visibility="collapsed"
-        )
+        st.markdown("### 📤 Upload Statement" + ("s" if upload_mode == "Batch Upload (Multiple Files)" else ""))
 
-        if uploaded_file:
-            st.session_state.uploaded_file_data = uploaded_file.read()
-            uploaded_file.seek(0)
-            st.success(f"✅ **{uploaded_file.name}** ({len(st.session_state.uploaded_file_data) / 1024:.1f} KB)")
+        if upload_mode == "Single Statement":
+            uploaded_file = st.file_uploader(
+                "Drag and drop or browse",
+                type=['pdf', 'png', 'jpg', 'jpeg'],
+                label_visibility="collapsed"
+            )
+
+            if uploaded_file:
+                st.session_state.uploaded_file_data = uploaded_file.read()
+                uploaded_file.seek(0)
+                st.success(f"✅ **{uploaded_file.name}** ({len(st.session_state.uploaded_file_data) / 1024:.1f} KB)")
+        else:
+            # Batch mode
+            uploaded_files = st.file_uploader(
+                "Drag and drop multiple PDFs or browse",
+                type=['pdf'],
+                accept_multiple_files=True,
+                label_visibility="collapsed"
+            )
+
+            if uploaded_files:
+                st.success(f"✅ **{len(uploaded_files)} files** selected")
+                for file in uploaded_files:
+                    st.caption(f"• {file.name} ({len(file.getvalue()) / 1024:.1f} KB)")
+                st.session_state.uploaded_files = uploaded_files
 
     with col2:
         st.markdown("### 🚀 Process")
-        if uploaded_file:
-            if st.button("🔍 Extract Data", use_container_width=True):
-                temp_path = Path(f"/tmp/{uploaded_file.name}")
-                with open(temp_path, "wb") as f:
-                    f.write(st.session_state.uploaded_file_data)
 
-                with st.spinner("Processing statement..."):
-                    try:
-                        pipeline = ExtractionPipeline()
-                        bank_param = None if selected_bank == 'Auto-detect' else selected_bank.lower()
-                        result = pipeline.process(temp_path, bank_name=bank_param)
-                        st.session_state.extraction_result = result
-                        st.success("✅ Extraction complete!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
-                    finally:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
+        if upload_mode == "Single Statement":
+            # Single file mode
+            if uploaded_file:
+                if st.button("🔍 Extract Data", use_container_width=True):
+                    temp_path = Path(f"/tmp/{uploaded_file.name}")
+                    with open(temp_path, "wb") as f:
+                        f.write(st.session_state.uploaded_file_data)
+
+                    with st.spinner("Processing statement..."):
+                        try:
+                            pipeline = ExtractionPipeline()
+                            bank_param = None if selected_bank == 'Auto-detect' else selected_bank.lower()
+                            result = pipeline.process(temp_path, bank_name=bank_param)
+                            st.session_state.extraction_result = result
+                            st.success("✅ Extraction complete!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+                        finally:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+            else:
+                st.info("👆 Upload a statement file to begin")
         else:
-            st.info("👆 Upload a statement file to begin")
+            # Batch mode
+            if 'uploaded_files' in st.session_state and st.session_state.uploaded_files:
+                if st.button("🔍 Extract All & Consolidate", use_container_width=True):
+                    from openpyxl import Workbook
+                    from openpyxl.styles import Font, PatternFill, Alignment
+                    from openpyxl.utils.dataframe import dataframe_to_rows
 
-    # Results
+                    all_transactions = []
+                    results = []
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for idx, file in enumerate(st.session_state.uploaded_files):
+                        status_text.text(f"Processing {idx + 1}/{len(st.session_state.uploaded_files)}: {file.name}")
+                        progress_bar.progress((idx + 1) / len(st.session_state.uploaded_files))
+
+                        try:
+                            temp_path = Path(f"/tmp/{file.name}")
+                            with open(temp_path, "wb") as f:
+                                f.write(file.getvalue())
+
+                            pipeline = ExtractionPipeline()
+                            bank_param = None if selected_bank == 'Auto-detect' else selected_bank.lower()
+                            result = pipeline.process(temp_path, bank_name=bank_param)
+
+                            if result.success and result.transactions:
+                                for txn in result.transactions:
+                                    all_transactions.append({
+                                        'Statement': file.name,
+                                        'Date': txn.date.strftime('%Y-%m-%d'),
+                                        'Description': txn.description,
+                                        'Money In': txn.money_in if txn.money_in else None,
+                                        'Money Out': txn.money_out if txn.money_out else None,
+                                        'Balance': txn.balance,
+                                        'Confidence %': txn.confidence
+                                    })
+
+                                results.append({
+                                    'file': file.name,
+                                    'success': True,
+                                    'transactions': len(result.transactions),
+                                    'confidence': result.confidence_score,
+                                    'reconciled': result.balance_reconciled
+                                })
+                            else:
+                                results.append({
+                                    'file': file.name,
+                                    'success': False,
+                                    'transactions': 0,
+                                    'error': result.error_message or 'No transactions found'
+                                })
+
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+
+                        except Exception as e:
+                            results.append({
+                                'file': file.name,
+                                'success': False,
+                                'transactions': 0,
+                                'error': str(e)
+                            })
+
+                    progress_bar.empty()
+                    status_text.empty()
+
+                    # Create consolidated Excel
+                    if all_transactions:
+                        st.session_state.batch_results = {
+                            'transactions': all_transactions,
+                            'summary': results
+                        }
+                        st.success(f"✅ Batch processing complete! {len(all_transactions):,} transactions from {len([r for r in results if r['success']])} statements")
+                        st.rerun()
+                    else:
+                        st.error("❌ No transactions extracted from any files")
+            else:
+                st.info("👆 Upload statement files to begin")
+
+    # Batch Results Display
+    if 'batch_results' in st.session_state and st.session_state.batch_results:
+        batch_data = st.session_state.batch_results
+        all_txns_df = pd.DataFrame(batch_data['transactions'])
+        summary_df = pd.DataFrame(batch_data['summary'])
+
+        st.markdown("---")
+        st.markdown("## 📊 Batch Extraction Results")
+
+        # Summary metrics
+        cols = st.columns(4)
+        with cols[0]:
+            st.metric("Total Files", len(summary_df))
+        with cols[1]:
+            successful = len([r for r in batch_data['summary'] if r['success']])
+            st.metric("Successful", f"{successful}/{len(summary_df)}")
+        with cols[2]:
+            st.metric("Total Transactions", f"{len(all_txns_df):,}")
+        with cols[3]:
+            avg_conf = sum(r['confidence'] for r in batch_data['summary'] if r['success']) / successful if successful > 0 else 0
+            st.metric("Avg Confidence", f"{avg_conf:.1f}%")
+
+        # Download consolidated Excel
+        st.markdown("### 💾 Download")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            all_txns_df.to_excel(writer, sheet_name='All Transactions', index=False)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Download Consolidated Excel",
+            data=excel_data,
+            file_name=f"batch_extraction_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+        # Show consolidated transactions
+        st.markdown("### 📋 All Transactions (Consolidated)")
+        st.dataframe(
+            all_txns_df,
+            use_container_width=True,
+            height=400
+        )
+
+        # Show summary table
+        st.markdown("### 📊 Per-Statement Summary")
+        st.dataframe(
+            summary_df,
+            use_container_width=True
+        )
+
+        return  # Don't show single file results
+
+    # Single File Results
     if st.session_state.extraction_result:
         result = st.session_state.extraction_result
 
