@@ -46,6 +46,10 @@ logs/*.log
 output/*
 !output/.gitkeep
 
+# Test Data (extracted output files)
+test_data/output/*.xlsx
+test_data/output/*.csv
+
 # Test Coverage
 .coverage
 htmlcov/
