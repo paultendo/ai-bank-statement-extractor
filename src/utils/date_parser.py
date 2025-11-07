@@ -137,11 +137,13 @@ def infer_year_from_period(
     if not parsed:
         return None
 
-    # Check if date string already contains a year
-    has_year = bool(re.search(r'\d{4}', date_str))
+    # Check if date string already contains a year (4-digit or 2-digit)
+    # Examples: "2024", "24", "01/12/2024", "01 Dec 24"
+    has_year = bool(re.search(r'\d{4}', date_str)) or bool(re.search(r'\b\d{2}\b', date_str))
 
     if has_year:
         # Year explicitly provided, use as-is
+        # Trust the parsed year rather than inferring from period
         return parsed
 
     # Try both years from period
