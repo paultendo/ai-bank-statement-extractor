@@ -655,6 +655,9 @@ class ExtractionPipeline:
         elif bank_config.bank_name.lower() == 'pagseguro':
             from .parsers.pagseguro_parser import PagSeguroParser
             PagSeguroParser._pdf_path = file_path
+        elif bank_config.bank_name.lower() == 'lloyds':
+            from .parsers.lloyds_parser import LloydsParser
+            LloydsParser._pdf_path = file_path
 
         parser = TransactionParser(bank_config)
         transactions = parser.parse_text(

@@ -27,6 +27,7 @@ from .nationwide_parser import NationwideParser
 from .credit_agricole_parser import CreditAgricoleParser
 from .pagseguro_parser import PagSeguroParser
 from .lcl_parser import LCLParser
+from .lloyds_parser import LloydsParser
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class TransactionParser:
             'credit_agricole': CreditAgricoleParser,
             'pagseguro': PagSeguroParser,
             'lcl': LCLParser,
+            'lloyds': LloydsParser,
         }
 
         parser_class = parser_map.get(bank_name)
