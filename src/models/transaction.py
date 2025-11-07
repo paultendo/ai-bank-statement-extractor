@@ -34,6 +34,7 @@ class Transaction:
         confidence: Confidence score (0-100)
         raw_text: Original text from statement
         page_number: Page number in statement
+        description_translated: English translation of description (for non-English banks)
     """
     date: datetime
     description: str
@@ -44,6 +45,7 @@ class Transaction:
     confidence: float = 100.0
     raw_text: Optional[str] = None
     page_number: Optional[int] = None
+    description_translated: Optional[str] = None
 
     def __post_init__(self):
         """Validate transaction data."""
@@ -56,7 +58,7 @@ class Transaction:
 
     def to_dict(self) -> dict:
         """Convert transaction to dictionary."""
-        return {
+        result = {
             'date': self.date.strftime('%Y-%m-%d'),
             'description': self.description,
             'money_in': round(self.money_in, 2),
@@ -66,3 +68,6 @@ class Transaction:
             'confidence': round(self.confidence, 2),
             'page_number': self.page_number
         }
+        if self.description_translated:
+            result['description_translated'] = self.description_translated
+        return result

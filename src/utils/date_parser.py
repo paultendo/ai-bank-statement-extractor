@@ -100,7 +100,8 @@ def parse_date(
 def infer_year_from_period(
     date_str: str,
     period_start: datetime,
-    period_end: datetime
+    period_end: datetime,
+    date_formats: Optional[List[str]] = None
 ) -> Optional[datetime]:
     """
     Parse date and infer year from statement period with cross-year logic.
@@ -112,9 +113,10 @@ def infer_year_from_period(
     reference/monopoly/src/monopoly/pipeline.py:106-110
 
     Args:
-        date_str: Date string (e.g., "01 Dec" or "28 DEC")
+        date_str: Date string (e.g., "01 Dec" or "28 DEC" or "02.09")
         period_start: Statement period start date
         period_end: Statement period end date
+        date_formats: Optional list of strptime formats to try
 
     Returns:
         datetime object with correct year
@@ -126,11 +128,11 @@ def infer_year_from_period(
     """
     # Parse without year, trying both period start and end years
     # This is crucial for leap year dates like "29 Feb" where one year might not be a leap year
-    parsed = parse_date(date_str, reference_year=period_start.year)
+    parsed = parse_date(date_str, date_formats=date_formats, reference_year=period_start.year)
 
     if not parsed and period_start.year != period_end.year:
         # If parsing failed (e.g., "29 Feb 2023" doesn't exist), try the end year
-        parsed = parse_date(date_str, reference_year=period_end.year)
+        parsed = parse_date(date_str, date_formats=date_formats, reference_year=period_end.year)
 
     if not parsed:
         return None
@@ -193,6 +195,8 @@ def normalize_date_string(date_str: str) -> str:
     """
     Normalize date string for consistent parsing.
 
+    Handles both English and French month names.
+
     Args:
         date_str: Raw date string
 
@@ -207,5 +211,47 @@ def normalize_date_string(date_str: str) -> str:
 
     # Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
     normalized = re.sub(r'(\d+)(?:st|nd|rd|th)\b', r'\1', normalized)
+
+    # Translate French month names to English
+    french_to_english_months = {
+        'janvier': 'January',
+        'février': 'February',
+        'fevrier': 'February',
+        'mars': 'March',
+        'avril': 'April',
+        'mai': 'May',
+        'juin': 'June',
+        'juillet': 'July',
+        'août': 'August',
+        'aout': 'August',
+        'septembre': 'September',
+        'octobre': 'October',
+        'novembre': 'November',
+        'décembre': 'December',
+        'decembre': 'December',
+        # Abbreviated forms
+        'janv': 'Jan',
+        'févr': 'Feb',
+        'fev': 'Feb',
+        'avr': 'Apr',
+        'juil': 'Jul',
+        'sept': 'Sep',
+        'oct': 'Oct',
+        'nov': 'Nov',
+        'déc': 'Dec',
+        'dec': 'Dec',
+    }
+
+    normalized_lower = normalized.lower()
+    for french, english in french_to_english_months.items():
+        if french in normalized_lower:
+            # Replace preserving case
+            normalized = re.sub(
+                re.escape(french),
+                english,
+                normalized,
+                flags=re.IGNORECASE
+            )
+            break
 
     return normalized

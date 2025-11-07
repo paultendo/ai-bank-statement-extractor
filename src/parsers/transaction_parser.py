@@ -24,6 +24,9 @@ from .monzo_parser import MonzoTransactionParser
 from .santander_parser import SantanderParser
 from .tsb_parser import TSBParser
 from .nationwide_parser import NationwideParser
+from .credit_agricole_parser import CreditAgricoleParser
+from .pagseguro_parser import PagSeguroParser
+from .lcl_parser import LCLParser
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,9 @@ class TransactionParser:
             'santander': SantanderParser,
             'tsb': TSBParser,
             'nationwide': NationwideParser,
+            'credit_agricole': CreditAgricoleParser,
+            'pagseguro': PagSeguroParser,
+            'lcl': LCLParser,
         }
 
         parser_class = parser_map.get(bank_name)
@@ -103,7 +109,6 @@ class TransactionParser:
         Returns:
             List of parsed Transaction objects
         """
-        logger.info(f"Parsing transactions with {self._parser.__class__.__name__}")
         return self._parser.parse_transactions(
             text,
             statement_start_date,

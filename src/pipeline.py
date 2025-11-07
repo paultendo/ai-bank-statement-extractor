@@ -98,7 +98,7 @@ class ExtractionPipeline:
                 )
 
             # 2c. Parse transactions
-            transactions = self._parse_transactions(text, bank_config, statement)
+            transactions = self._parse_transactions(text, bank_config, statement, file_path)
             if not transactions:
                 return self._create_error_result(
                     "No transactions found in statement",
@@ -143,7 +143,10 @@ class ExtractionPipeline:
                 actual_end = sorted_txns[-1].date
 
                 logger.info(f"Refining statement period from transactions:")
-                logger.info(f"  Original: {statement.statement_start_date.date()} to {statement.statement_end_date.date()}")
+                if statement.statement_start_date and statement.statement_end_date:
+                    logger.info(f"  Original: {statement.statement_start_date.date()} to {statement.statement_end_date.date()}")
+                else:
+                    logger.info(f"  Original: None (no dates in metadata)")
                 logger.info(f"  Refined: {actual_start.date()} to {actual_end.date()}")
                 if brought_forward_txn:
                     logger.info(f"  (Using BROUGHT FORWARD transaction date as start)")
@@ -279,8 +282,7 @@ class ExtractionPipeline:
 
         # Try PDF text extraction
         if file_path.suffix.lower() == '.pdf':
-            # Use pdftotext for all supported banks (it's faster and more reliable for layout preservation)
-            # Only fall back to pdfplumber for unknown banks
+            # Try pdftotext first (better layout preservation with -layout flag)
             try:
                 text, confidence = self.pdftotext_extractor.extract(file_path)
                 if text:
@@ -292,8 +294,33 @@ class ExtractionPipeline:
             except Exception as e:
                 logger.warning(f"pdftotext extraction failed: {e}")
 
-        # TODO: Try OCR for scanned PDFs/images
-        # TODO: Try Vision API as fallback
+            # Fallback to pdfplumber
+            try:
+                text, confidence = self.pdf_extractor.extract(file_path)
+                if text:
+                    logger.info(f"✓ pdfplumber extraction successful (fallback)")
+                    return text, confidence, "pdfplumber"
+            except Exception as e:
+                logger.warning(f"pdfplumber extraction failed: {e}")
+
+        # Try Vision API for scanned PDFs/images (last resort - expensive but robust)
+        try:
+            from .extractors.vision_extractor import VisionExtractor
+            logger.info("Attempting Vision API extraction (scanned document detected)")
+
+            vision_extractor = VisionExtractor()
+            text, confidence = vision_extractor.extract(file_path)
+            if text:
+                logger.info(f"✓ Vision API extraction successful")
+                return text, confidence, "vision_api"
+        except ImportError as e:
+            logger.warning(f"Vision API extractor not available: {e}")
+        except ValueError as e:
+            logger.warning(f"Vision API not configured: {e}")
+        except Exception as e:
+            logger.error(f"Vision API extraction failed: {e}")
+
+        # TODO: Try OCR (Tesseract) for medium quality scans (cheaper than Vision API)
 
         return "", 0.0, "none"
 
@@ -389,20 +416,22 @@ class ExtractionPipeline:
             if not period_start_str or not period_end_str:
                 statement_date_str = extracted.get('statement_date')
                 if not statement_date_str:
-                    logger.error("Missing statement period dates")
-                    return None
+                    # No dates in metadata - will infer from transactions
+                    logger.warning("Missing statement period dates in metadata - will infer from transactions")
+                    statement_start = None
+                    statement_end = None
+                else:
+                    # Use statement date as a reference point
+                    # We'll infer the actual period from transaction dates later
+                    statement_date = parse_date(statement_date_str, bank_config.date_formats)
+                    if not statement_date:
+                        logger.error("Could not parse statement date")
+                        return None
 
-                # Use statement date as a reference point
-                # We'll infer the actual period from transaction dates later
-                statement_date = parse_date(statement_date_str, bank_config.date_formats)
-                if not statement_date:
-                    logger.error("Could not parse statement date")
-                    return None
-
-                # Use statement date for both start and end (will be refined from transactions)
-                statement_start = statement_date
-                statement_end = statement_date
-                logger.info(f"Using statement date {statement_date.date()} as initial period (will be refined from transactions)")
+                    # Use statement date for both start and end (will be refined from transactions)
+                    statement_start = statement_date
+                    statement_end = statement_date
+                    logger.info(f"Using statement date {statement_date.date()} as initial period (will be refined from transactions)")
             else:
                 # Parse end date first (it has the year)
                 statement_end = parse_date(period_end_str, bank_config.date_formats)
@@ -459,14 +488,18 @@ class ExtractionPipeline:
                 statement_end_date=statement_end,
                 opening_balance=opening_balance,
                 closing_balance=closing_balance,
-                currency="GBP",
+                currency=bank_config.currency,
                 sort_code=sort_code
             )
 
             # Store combined statement flag for later use
             statement._is_combined = is_combined_statement
 
-            logger.info(f"✓ Metadata extracted: {account_number}, {statement_start.date()} to {statement_end.date()}")
+            # Log metadata extraction
+            if statement_start and statement_end:
+                logger.info(f"✓ Metadata extracted: {account_number}, {statement_start.date()} to {statement_end.date()}")
+            else:
+                logger.info(f"✓ Metadata extracted: {account_number} (dates will be inferred from transactions)")
             logger.debug(f"Account holder: '{account_holder}', Sort code: '{sort_code}'")
             return statement
 
@@ -515,6 +548,14 @@ class ExtractionPipeline:
             re.MULTILINE
         )
 
+        # Pattern 3: Crédit Agricole-style balance dates
+        # "Ancien solde créditeur au 01.09.2025" and "Nouveau solde créditeur au 01.10.2025"
+        credit_agricole_dates = re.findall(
+            r'(?:Ancien|Nouveau)\s+solde.*?au\s+(\d{2}\.\d{2}\.\d{4})',
+            text,
+            re.MULTILINE | re.IGNORECASE
+        )
+
         # Use whichever pattern found more matches
         if len(barclays_markers) > 1:
             period_markers = barclays_markers
@@ -522,6 +563,9 @@ class ExtractionPipeline:
         elif len(monzo_ranges) > 1:
             period_markers = monzo_ranges
             pattern_type = "Monzo-style"
+        elif len(credit_agricole_dates) > 2:  # Need at least opening and closing dates
+            period_markers = credit_agricole_dates
+            pattern_type = "CreditAgricole-style"
         else:
             # Single period, no expansion needed
             return None, None
@@ -533,7 +577,7 @@ class ExtractionPipeline:
         for marker in period_markers:
             if pattern_type == "Barclays-style":
                 # Parse start dates only
-                parsed = infer_year_from_period(marker, initial_start, initial_end)
+                parsed = infer_year_from_period(marker, initial_start, initial_end, bank_config.date_formats)
                 if not parsed:
                     parsed = parse_date(marker, bank_config.date_formats)
                 if parsed:
@@ -541,7 +585,7 @@ class ExtractionPipeline:
                     logger.debug(f"Parsed period marker: {marker} → {parsed.date()}")
                 else:
                     logger.warning(f"Could not parse period marker: {marker}")
-            else:
+            elif pattern_type == "Monzo-style":
                 # Monzo: marker is a tuple (start_date, end_date)
                 start_str, end_str = marker
                 start_parsed = parse_date(start_str, bank_config.date_formats)
@@ -552,6 +596,14 @@ class ExtractionPipeline:
                     logger.debug(f"Parsed period range: {start_str} - {end_str} → {start_parsed.date()} to {end_parsed.date()}")
                 else:
                     logger.warning(f"Could not parse period range: {start_str} - {end_str}")
+            else:
+                # CreditAgricole: marker is a date string "DD.MM.YYYY"
+                parsed = parse_date(marker, bank_config.date_formats)
+                if parsed:
+                    period_dates.append(parsed)
+                    logger.debug(f"Parsed period marker: {marker} → {parsed.date()}")
+                else:
+                    logger.warning(f"Could not parse period marker: {marker}")
 
         if len(period_dates) < 2:
             # Couldn't parse enough dates to determine range
@@ -579,7 +631,8 @@ class ExtractionPipeline:
         self,
         text: str,
         bank_config: BankConfig,
-        statement: Statement
+        statement: Statement,
+        file_path: Path
     ) -> list:
         """
         Parse transactions from text.
@@ -588,11 +641,20 @@ class ExtractionPipeline:
             text: Extracted text
             bank_config: Bank configuration
             statement: Statement metadata (for date inference)
+            file_path: Path to PDF file (for parsers that need direct PDF access)
 
         Returns:
             List of Transaction objects
         """
         logger.info("Parsing transactions...")
+
+        # Set PDF path for parsers that use pdfplumber for direct PDF access
+        if bank_config.bank_name.lower() == 'credit_agricole':
+            from .parsers.credit_agricole_parser import CreditAgricoleParser
+            CreditAgricoleParser._pdf_path = file_path
+        elif bank_config.bank_name.lower() == 'pagseguro':
+            from .parsers.pagseguro_parser import PagSeguroParser
+            PagSeguroParser._pdf_path = file_path
 
         parser = TransactionParser(bank_config)
         transactions = parser.parse_text(

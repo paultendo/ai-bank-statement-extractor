@@ -57,6 +57,11 @@ class BankConfig:
         """Get balance tolerance for reconciliation."""
         return self.validation.get('balance_tolerance', 0.01)
 
+    @property
+    def currency(self) -> str:
+        """Get currency code (e.g., 'GBP', 'EUR', 'BRL')."""
+        return self._config.get('currency', 'GBP')
+
     def get(self, key: str, default=None):
         """Get any config value by key."""
         return self._config.get(key, default)

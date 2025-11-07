@@ -84,6 +84,37 @@ class ExcelExporter:
 
         return output_path
 
+    def _get_currency_format(self, result: ExtractionResult) -> str:
+        """
+        Get Excel currency format string based on statement currency.
+
+        Args:
+            result: Extraction result with statement metadata
+
+        Returns:
+            Excel number format string (e.g., '£#,##0.00', 'R$#,##0.00')
+        """
+        # Default to GBP if no statement metadata
+        if not result.statement or not result.statement.currency:
+            return '£#,##0.00'
+
+        currency = result.statement.currency.upper()
+
+        # Map currency codes to Excel format strings
+        currency_formats = {
+            'GBP': '£#,##0.00',
+            'EUR': '€#,##0.00',
+            'USD': '$#,##0.00',
+            'BRL': 'R$#,##0.00',  # Brazilian Real
+            'CAD': 'CA$#,##0.00',
+            'AUD': 'A$#,##0.00',
+            'JPY': '¥#,##0',  # No decimal places for Yen
+            'CHF': 'CHF#,##0.00',
+            'INR': '₹#,##0.00',
+        }
+
+        return currency_formats.get(currency, f'{currency} #,##0.00')
+
     def _create_transactions_sheet(
         self,
         wb: openpyxl.Workbook,
@@ -94,16 +125,19 @@ class ExcelExporter:
         """Create transactions sheet with formatted data."""
         ws = wb.create_sheet("Transactions", 0)
 
-        # Headers
-        headers = [
-            "Date",
-            "Description",
-            "Money In",
-            "Money Out",
-            "Balance",
-            "Type",
-            "Confidence %"
-        ]
+        # Check if any transactions have translations
+        has_translations = any(
+            txn.description_translated for txn in result.transactions
+        )
+
+        # Determine currency format from statement metadata
+        currency_format = self._get_currency_format(result)
+
+        # Headers (conditionally include translation column)
+        headers = ["Date", "Description"]
+        if has_translations:
+            headers.append("Description (English)")
+        headers.extend(["Money In", "Money Out", "Balance", "Type", "Confidence %"])
 
         # Write headers
         for col, header in enumerate(headers, 1):
@@ -114,32 +148,54 @@ class ExcelExporter:
 
         # Write transactions
         for row, txn in enumerate(result.transactions, 2):
-            ws.cell(row=row, column=1, value=txn.date.strftime("%Y-%m-%d"))
-            ws.cell(row=row, column=2, value=txn.description)
-            ws.cell(row=row, column=3, value=txn.money_in if txn.money_in > 0 else "")
-            ws.cell(row=row, column=4, value=txn.money_out if txn.money_out > 0 else "")
-            ws.cell(row=row, column=5, value=txn.balance)
-            ws.cell(row=row, column=6, value=txn.transaction_type.value if txn.transaction_type else "")
-            ws.cell(row=row, column=7, value=round(txn.confidence, 1))
+            col_idx = 1
+            ws.cell(row=row, column=col_idx, value=txn.date.strftime("%Y-%m-%d"))
+            col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=txn.description)
+            col_idx += 1
+
+            if has_translations:
+                ws.cell(row=row, column=col_idx, value=txn.description_translated or "")
+                col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=txn.money_in if txn.money_in > 0 else "")
+            money_in_col = col_idx
+            col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=txn.money_out if txn.money_out > 0 else "")
+            money_out_col = col_idx
+            col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=txn.balance)
+            balance_col = col_idx
+            col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=txn.transaction_type.value if txn.transaction_type else "")
+            col_idx += 1
+
+            ws.cell(row=row, column=col_idx, value=round(txn.confidence, 1))
 
             # Format numbers as currency
-            for col in [3, 4, 5]:
-                ws.cell(row=row, column=col).number_format = '£#,##0.00'
+            for col in [money_in_col, money_out_col, balance_col]:
+                ws.cell(row=row, column=col).number_format = currency_format
 
             # Highlight low confidence rows
             if highlight_low_confidence and txn.confidence < confidence_threshold:
-                for col in range(1, 8):
+                for col in range(1, len(headers) + 1):
                     ws.cell(row=row, column=col).fill = PatternFill(
                         start_color=self.WARNING_COLOR,
                         fill_type="solid"
                     )
 
         # Auto-size columns
-        for col in range(1, 8):
+        for col in range(1, len(headers) + 1):
             ws.column_dimensions[get_column_letter(col)].width = 15
 
-        # Description column wider
+        # Description columns wider
         ws.column_dimensions['B'].width = 50
+        if has_translations:
+            ws.column_dimensions['C'].width = 50
 
         # Add totals row
         total_row = len(result.transactions) + 3
@@ -149,13 +205,14 @@ class ExcelExporter:
         total_in = sum(txn.money_in for txn in result.transactions)
         total_out = sum(txn.money_out for txn in result.transactions)
 
-        ws.cell(row=total_row, column=3, value=total_in)
-        ws.cell(row=total_row, column=4, value=total_out)
+        # Totals in correct columns (account for optional translation column)
+        ws.cell(row=total_row, column=money_in_col, value=total_in)
+        ws.cell(row=total_row, column=money_out_col, value=total_out)
 
-        for col in [3, 4]:
+        for col in [money_in_col, money_out_col]:
             cell = ws.cell(row=total_row, column=col)
             cell.font = Font(bold=True)
-            cell.number_format = '£#,##0.00'
+            cell.number_format = currency_format
             cell.fill = PatternFill(start_color=self.INFO_COLOR, fill_type="solid")
 
         # Freeze header row
@@ -175,6 +232,20 @@ class ExcelExporter:
 
         stmt = result.statement
 
+        # Get currency symbol for display
+        currency_symbols = {
+            'GBP': '£',
+            'EUR': '€',
+            'USD': '$',
+            'BRL': 'R$',
+            'CAD': 'CA$',
+            'AUD': 'A$',
+            'JPY': '¥',
+            'CHF': 'CHF',
+            'INR': '₹',
+        }
+        currency_symbol = currency_symbols.get(stmt.currency.upper(), stmt.currency)
+
         # Metadata rows
         metadata = [
             ("Bank Name", stmt.bank_name),
@@ -188,8 +259,8 @@ class ExcelExporter:
             ("  End Date", stmt.statement_end_date.strftime("%Y-%m-%d")),
             ("", ""),
             ("Balances", ""),
-            ("  Opening Balance", f"£{stmt.opening_balance:,.2f}"),
-            ("  Closing Balance", f"£{stmt.closing_balance:,.2f}"),
+            ("  Opening Balance", f"{currency_symbol}{stmt.opening_balance:,.2f}"),
+            ("  Closing Balance", f"{currency_symbol}{stmt.closing_balance:,.2f}"),
             ("", ""),
             ("Transaction Count", len(result.transactions)),
             ("Extraction Method", result.extraction_method),

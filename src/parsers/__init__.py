@@ -9,6 +9,9 @@ from .monzo_parser import MonzoTransactionParser
 from .santander_parser import SantanderParser
 from .tsb_parser import TSBParser
 from .nationwide_parser import NationwideParser
+from .credit_agricole_parser import CreditAgricoleParser
+from .pagseguro_parser import PagSeguroParser
+from .lcl_parser import LCLParser
 
 __all__ = [
     'TransactionParser',
@@ -22,4 +25,7 @@ __all__ = [
     'SantanderParser',
     'TSBParser',
     'NationwideParser',
+    'CreditAgricoleParser',
+    'PagSeguroParser',
+    'LCLParser',
 ]
