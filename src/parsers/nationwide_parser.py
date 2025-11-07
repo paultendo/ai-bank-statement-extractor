@@ -63,27 +63,29 @@ class NationwideParser(BaseTransactionParser):
         # Pattern to match amounts
         amount_pattern = re.compile(r'([\d,]+\.\d{2})')
 
-        # Extract year from statement date or first transaction
-        year = statement_end_date.year if statement_end_date else datetime.now().year
+        # Column thresholds will be detected from header (if found)
+        # Default thresholds as fallback (based on older Nationwide format)
+        MONEY_OUT_THRESHOLD = 104
+        MONEY_IN_THRESHOLD = 123
 
-        # Define column names for detection
-        column_names = ["£ Out", "£ In", "£ Balance"]
-        column_pairs = [("£ Out", "£ In"), ("£ In", "£ Balance")]
+        # Try to detect column positions from header
+        if header_line_idx is not None:
+            header_line = lines[header_line_idx]
+            money_out_match = re.search(r'£\s*Out', header_line, re.IGNORECASE)
+            money_in_match = re.search(r'£\s*In', header_line, re.IGNORECASE)
+            balance_match = re.search(r'£\s*Balance', header_line, re.IGNORECASE)
 
-        # Default thresholds based on typical Nationwide layout
-        # Columns are right-aligned, so amounts appear at the END of each column
-        # £ Out column: 57-105 (amounts around 70-90)
-        # £ In column: 106-123 (amounts around 105-120)
-        # £ Balance column: 124+ (amounts around 130-140)
-        default_thresholds = {
-            '£_out_threshold': 104,     # Just before £ In column starts
-            '£_in_threshold': 123       # End of £ In column
-        }
-
-        # Use manual thresholds for Nationwide (amounts are right-aligned)
-        # The pre_scan calculates midpoints which don't work for right-aligned columns
-        thresholds = default_thresholds
-        logger.info(f"Using column thresholds: {thresholds}")
+            if money_out_match and money_in_match and balance_match:
+                # For right-aligned amounts, threshold is at the start of the next column
+                # Amounts ending before Money In column start are in Money Out
+                # Amounts ending before Balance column start are in Money In
+                MONEY_OUT_THRESHOLD = money_in_match.start() - 1
+                MONEY_IN_THRESHOLD = balance_match.start() - 1
+                logger.info(f"Detected Nationwide column thresholds from header: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
+            else:
+                logger.info(f"Using default Nationwide thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
+        else:
+            logger.info(f"No header found, using default thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
 
         # The info box on the right starts around position 150
         # We need to filter out amounts from the info box
@@ -100,8 +102,58 @@ class NationwideParser(BaseTransactionParser):
                 idx += 1
                 continue
 
-            # Skip footer lines and informational text
-            if re.search(r'Nationwide Building Society|Prudential Regulation|Head Office|Please check|Interest, Rates and Fees|Summary box|Credit interest|Arranged overdraft|AER stands for|Have you lost your card|As an example|For the.*example|incurred up to|withdrawal in a|us as a sterling|Non-Sterling Transaction', line, re.IGNORECASE):
+            # Check for header on new page (update thresholds if found)
+            header_pattern_inline = re.compile(
+                r'Date\s+Description.*£\s*Out.*£\s*In.*£\s*Balance',
+                re.IGNORECASE
+            )
+            if header_pattern_inline.search(line):
+                money_out_match = re.search(r'£\s*Out', line, re.IGNORECASE)
+                money_in_match = re.search(r'£\s*In', line, re.IGNORECASE)
+                balance_match = re.search(r'£\s*Balance', line, re.IGNORECASE)
+
+                if money_out_match and money_in_match and balance_match:
+                    MONEY_OUT_THRESHOLD = money_in_match.start() - 1
+                    MONEY_IN_THRESHOLD = balance_match.start() - 1
+                    logger.debug(f"Updated Nationwide thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
+
+                idx += 1
+                continue
+
+            # Skip footer lines, informational text, and page boundaries
+            skip_patterns = [
+                r'Nationwide Building Society',
+                r'Prudential Regulation',
+                r'Head Office',
+                r'Please check',
+                r'Interest, Rates and Fees',
+                r'Summary box',
+                r'Credit interest',
+                r'Arranged overdraft',
+                r'AER stands for',
+                r'Have you lost your card',
+                r'As an example',
+                r'For the.*example',
+                r'incurred up to',
+                r'withdrawal in a',
+                r'us as a sterling',
+                r'Non-Sterling Transaction',
+                r'Page \d+ of \d+',
+                r'Continued on next page',
+                r'Financial Conduct Authority',
+                r'Financial Services Compensation',
+                r'is higher as we charge interest',  # Info box text that was parsed as transaction
+                r'^\s*TOTALS\s*$',  # Summary totals line
+                r'Statement no:',
+                r'Statement date:',
+                r'Sort code',
+                r'Account no',
+                r'FlexAccount',
+                r'Your.*transactions',
+                r'Registered Office',
+                r'Balance from statement \d+',  # Already handled separately
+            ]
+            if any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
                 idx += 1
                 continue
 
@@ -112,11 +164,16 @@ class NationwideParser(BaseTransactionParser):
                 # This is a new date line - extract date
                 date_str = date_match.group(1)
 
-                # Parse date
-                try:
-                    current_date = parse_date(f"{date_str} {year}", self.config.date_formats)
-                except:
-                    current_date = None
+                # Parse date using infer_year_from_period for multi-month statements
+                if statement_start_date and statement_end_date:
+                    current_date = infer_year_from_period(
+                        date_str,
+                        statement_start_date,
+                        statement_end_date,
+                        date_formats=self.config.date_formats
+                    )
+                else:
+                    current_date = parse_date(date_str, self.config.date_formats)
 
                 if current_date:
                     logger.debug(f"Found date: {current_date.date()} from '{date_str}'")
@@ -155,25 +212,22 @@ class NationwideParser(BaseTransactionParser):
                     if pos < INFO_BOX_START:
                         amounts_with_pos.append((amt_str, pos))
 
-                # Parse amounts by position using dynamic thresholds
+                # Parse amounts by position using detected thresholds
                 money_out = 0.0
                 money_in = 0.0
                 balance = None
 
-                # Define column order for classification
-                column_order = ['£_out', '£_in', '£_balance']
-
                 for amt_str, pos in amounts_with_pos:
                     amt_val = parse_currency(amt_str) or 0.0
 
-                    # Classify using dynamic column detection
-                    column = classify_amount_by_position(pos, thresholds, column_order)
+                    # Classify by position (amounts are right-aligned, so we check where they END)
+                    amt_end_pos = pos + len(amt_str)
 
-                    if column == '£_out':
+                    if amt_end_pos <= MONEY_OUT_THRESHOLD:
                         money_out = abs(amt_val)
-                    elif column == '£_in':
+                    elif amt_end_pos <= MONEY_IN_THRESHOLD:
                         money_in = abs(amt_val)
-                    else:  # £_balance
+                    else:
                         balance = amt_val
 
                 # Detect transaction type
