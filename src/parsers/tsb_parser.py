@@ -117,33 +117,9 @@ class TSBParser(BaseTransactionParser):
         while idx < len(lines):
             line = lines[idx]
 
-            # Skip blank lines
-            if not line.strip():
-                idx += 1
-                continue
-
-            # Skip footers and other non-transaction lines
-            skip_patterns = [
-                r'TSB Bank plc',
-                r'Registered Office',
-                r'Page \d+ of \d+',
-                r'Continued on next page',
-                r'Financial Conduct Authority',
-                r'Financial Services Compensation',  # Footer text
-                r'Prudential Regulation',
-                r'DV015004A-\d+-E-TSBS',  # Document reference
-                r'^Balance on \d{1,2}',  # Balance summary lines that start a line
-                r'^\s*Money in\s*$',  # Bare "Money in" (header or summary)
-                r'^\s*Money out\s*$',  # Bare "Money out" (header or summary)
-                r'Sort Code:\s*\d{2}-\d{2}-\d{2}',  # Sort code line
-                r'Account Number:\s*\d+',  # Account number line
-                r'Statement number:',  # Statement number line
-                r'Easy Saver',  # Account type line
-                r'Your Transactions',  # Section header
-                r'^\s+\d{2}/\d{2}/\d{4}\s*$',  # Bare date (e.g., "12/09/2024")
-                r'covered by these schemes',  # End of footer text
-            ]
-            if any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+            # Skip footers, headers, and other non-transaction lines
+            # Uses shared skip patterns plus TSB-specific ones
+            if self._is_skip_line(line):
                 idx += 1
                 continue
 

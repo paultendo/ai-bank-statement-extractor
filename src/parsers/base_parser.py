@@ -22,6 +22,11 @@ from typing import Optional, List
 from ..models import Transaction, TransactionType
 from ..config import BankConfig
 from ..utils import parse_currency, parse_date, infer_year_from_period
+from ..utils.column_detection import (
+    pre_scan_for_thresholds,
+    find_and_update_thresholds,
+    classify_amount_by_position
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +200,58 @@ class BaseTransactionParser(ABC):
        and footer/header avoidance.
     """
 
+    # Universal skip patterns (footer/header/summary text) common across all banks
+    # Subclasses can add bank-specific patterns via config.skip_patterns
+    UNIVERSAL_SKIP_PATTERNS = [
+        # Page markers
+        r'Page \d+ of \d+',
+        r'^\s*Page \d+\s*$',
+        r'--- Page \d+ ---',
+        r'Continued on next page',
+
+        # Regulatory/compliance text
+        r'Financial Conduct Authority',
+        r'Financial Services Compensation',
+        r'Prudential Regulation Authority',
+        r'Prudential Regulation',
+        r'FSCS',
+        r'authorised by the',
+        r'regulated by the',
+
+        # Account metadata (non-transaction lines)
+        r'Sort code',
+        r'Account number',
+        r'Account no',
+        r'Statement no:',
+        r'Statement date:',
+        r'BIC:',
+        r'IBAN:',
+        r'Swift',
+
+        # Bank names and addresses
+        r'Registered Office',
+        r'Head Office',
+        r'www\.',
+        r'\.com',
+        r'\.co\.uk',
+
+        # Summary/totals lines
+        r'^\s*TOTALS\s*$',
+        r'Total deposits',
+        r'Total outgoings',
+        r'Total withdrawals',
+        r'Total payments in',
+        r'Total payments out',
+
+        # Balance markers (when not part of transaction)
+        r'^Balance on \d{1,2}',
+        r'Opening balance',
+        r'Closing balance',
+
+        # Empty/whitespace patterns
+        r'^\s*$',
+    ]
+
     def __init__(self, bank_config: BankConfig):
         """
         Initialize parser with bank configuration.
@@ -367,6 +424,158 @@ class BaseTransactionParser(ABC):
 
         # Default to withdrawn if can't determine
         return 'withdrawn'
+
+    def _is_skip_line(self, line: str) -> bool:
+        """
+        Check if a line should be skipped (footer/header/summary text).
+
+        This method checks against both universal skip patterns (common
+        across all banks) and bank-specific patterns from config.
+
+        Args:
+            line: Line of text to check
+
+        Returns:
+            True if line should be skipped, False otherwise
+
+        Example:
+            >>> if self._is_skip_line(line):
+            ...     continue  # Skip this line
+        """
+        if not line or not line.strip():
+            return True
+
+        # Check universal patterns
+        for pattern in self.UNIVERSAL_SKIP_PATTERNS:
+            if re.search(pattern, line, re.IGNORECASE):
+                return True
+
+        # Check bank-specific patterns from config
+        bank_specific_patterns = getattr(self.config, 'skip_patterns', [])
+        for pattern in bank_specific_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                return True
+
+        return False
+
+    def _detect_column_thresholds(
+        self,
+        lines: List[str],
+        column_names: List[str],
+        column_pairs: List[tuple],
+        default_thresholds: dict
+    ) -> dict:
+        """
+        Pre-scan document to detect column positions and set thresholds.
+
+        This is a wrapper around column_detection.pre_scan_for_thresholds
+        that provides a consistent interface for all parsers.
+
+        Args:
+            lines: All lines from the document
+            column_names: List of column names to search for (e.g., ["Money out", "Money in", "Balance"])
+            column_pairs: List of (left_col, right_col) tuples for threshold calculation
+            default_thresholds: Fallback thresholds if no header found
+
+        Returns:
+            Dictionary of threshold names to positions
+
+        Example:
+            >>> thresholds = self._detect_column_thresholds(
+            ...     lines,
+            ...     ["Money out", "Money in", "Balance"],
+            ...     [("Money out", "Money in"), ("Money in", "Balance")],
+            ...     {'money_out_threshold': 75, 'money_in_threshold': 95}
+            ... )
+        """
+        return pre_scan_for_thresholds(lines, column_names, column_pairs, default_thresholds)
+
+    def _update_column_thresholds_from_header(
+        self,
+        line: str,
+        column_names: List[str],
+        column_pairs: List[tuple]
+    ) -> Optional[dict]:
+        """
+        Update column thresholds from a header line encountered during parsing.
+
+        Use this when processing multi-page documents that may have headers
+        with different column positions on different pages.
+
+        Args:
+            line: The line to check for header
+            column_names: List of column names to search for
+            column_pairs: List of (left_col, right_col) tuples
+
+        Returns:
+            Updated thresholds dict if header found, None otherwise
+
+        Example:
+            >>> thresholds = self._update_column_thresholds_from_header(
+            ...     line,
+            ...     ["Money out", "Money in", "Balance"],
+            ...     [("Money out", "Money in"), ("Money in", "Balance")]
+            ... )
+            >>> if thresholds:
+            ...     MONEY_OUT_THRESHOLD = thresholds['money_out_threshold']
+            ...     MONEY_IN_THRESHOLD = thresholds['money_in_threshold']
+        """
+        return find_and_update_thresholds(line, column_names, column_pairs)
+
+    def _validate_and_correct_balance(
+        self,
+        transaction: Transaction,
+        prev_balance: Optional[float] = None,
+        allow_direction_swap: bool = True,
+        swap_threshold: float = 0.01
+    ) -> Transaction:
+        """
+        Validate and auto-correct transaction balance discrepancies.
+
+        This method checks if the balance change matches the calculated change
+        (money_in - money_out). If there's a mismatch and direction swapping
+        is allowed, it will swap money_in and money_out if that improves accuracy.
+
+        Based on HSBC parser's balance validation logic (lines 297-314).
+
+        Args:
+            transaction: Transaction to validate
+            prev_balance: Previous transaction's balance (for balance change calc)
+            allow_direction_swap: If True, swap money_in/out if it improves accuracy
+            swap_threshold: Minimum error (in pounds) to trigger swap attempt
+
+        Returns:
+            Validated/corrected Transaction object
+
+        Example:
+            >>> transaction = self._validate_and_correct_balance(
+            ...     transaction,
+            ...     prev_balance=transactions[-1].balance if transactions else None
+            ... )
+        """
+        if prev_balance is None or transaction.balance is None:
+            return transaction
+
+        # Calculate actual vs expected balance change
+        balance_change = transaction.balance - prev_balance
+        calculated_change = transaction.money_in - transaction.money_out
+
+        # Check if there's a significant mismatch
+        if abs(calculated_change - balance_change) > swap_threshold and allow_direction_swap:
+            # Calculate error before and after potential swap
+            error_before = abs(calculated_change - balance_change)
+            calculated_after_swap = transaction.money_out - transaction.money_in
+            error_after = abs(calculated_after_swap - balance_change)
+
+            # Only swap if it actually improves accuracy
+            if error_after < error_before:
+                logger.debug(
+                    f"Swapping direction for '{transaction.description[:30]}': "
+                    f"Error {error_before:.2f} -> {error_after:.2f}"
+                )
+                transaction.money_in, transaction.money_out = transaction.money_out, transaction.money_in
+
+        return transaction
 
     def _calculate_confidence(
         self,

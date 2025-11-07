@@ -68,6 +68,20 @@ tsb:
   special_transactions:
     opening_balance: "STATEMENT OPENING BALANCE"
 
+  # Bank-specific skip patterns (in addition to universal patterns)
+  skip_patterns:
+    - "TSB Bank plc"
+    - "DV015004A-\\d+-E-TSBS"  # Document reference
+    - "^\\s*Money in\\s*$"     # Bare "Money in" (header or summary)
+    - "^\\s*Money out\\s*$"    # Bare "Money out" (header or summary)
+    - "Sort Code:\\s*\\d{2}-\\d{2}-\\d{2}"  # Sort code line
+    - "Account Number:\\s*\\d+"  # Account number line
+    - "Statement number:"
+    - "Easy Saver"  # Account type
+    - "Your Transactions"
+    - "^\\s+\\d{2}/\\d{2}/\\d{4}\\s*$"  # Bare date line
+    - "covered by these schemes"
+
   # Validation rules
   validation:
     balance_tolerance: 0.01
