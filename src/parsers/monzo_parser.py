@@ -411,18 +411,30 @@ class MonzoTransactionParser(BaseTransactionParser):
         for _, txn in indexed_transactions:
             # Insert period marker before transactions that start a new period
             if hasattr(txn, '_period_start') and txn._period_start:
-                # Carry forward balance from previous period
+                # Calculate opening balance of new period from first transaction
+                # Opening = Current Balance - Money In + Money Out
+                opening_balance = txn.balance - txn.money_in + txn.money_out
+
                 marker = Transaction(
                     date=txn.date,  # Same date as first transaction of new period
                     description="MONZO_PERIOD_BREAK",
                     money_in=0.0,
                     money_out=0.0,
-                    balance=previous_balance,  # Carry forward from previous period
+                    balance=opening_balance,  # Use actual opening balance of new period
                     transaction_type=TransactionType.OTHER,
                     confidence=100.0
                 )
                 final_transactions.append(marker)
-                logger.debug(f"Inserted period marker before {txn.date.date()} with balance £{previous_balance:.2f}")
+
+                # Log if there's a discrepancy between periods
+                if abs(previous_balance - opening_balance) > 0.01:
+                    logger.warning(
+                        f"Period break at {txn.date.date()}: Previous closing balance £{previous_balance:.2f} "
+                        f"!= New opening balance £{opening_balance:.2f} (diff: £{opening_balance - previous_balance:.2f})"
+                    )
+                else:
+                    logger.debug(f"Inserted period marker before {txn.date.date()} with balance £{opening_balance:.2f}")
+
                 # Clean up the marker attribute
                 delattr(txn, '_period_start')
 

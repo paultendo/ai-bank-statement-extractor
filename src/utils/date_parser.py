@@ -195,7 +195,7 @@ def normalize_date_string(date_str: str) -> str:
     """
     Normalize date string for consistent parsing.
 
-    Handles both English and French month names.
+    Handles both English and French month names, and common typos.
 
     Args:
         date_str: Raw date string
@@ -205,6 +205,22 @@ def normalize_date_string(date_str: str) -> str:
     """
     # Remove extra whitespace
     normalized = ' '.join(date_str.split())
+
+    # Fix common month typos (case-insensitive)
+    month_typos = {
+        'sepember': 'September',
+        'feburary': 'February',
+    }
+    normalized_lower = normalized.lower()
+    for typo, correct in month_typos.items():
+        if typo in normalized_lower:
+            # Replace preserving original case position
+            normalized = re.sub(
+                re.escape(typo),
+                correct,
+                normalized,
+                flags=re.IGNORECASE
+            )
 
     # Normalize month abbreviations (remove periods)
     normalized = re.sub(r'(\w{3})\.', r'\1', normalized)
@@ -245,13 +261,14 @@ def normalize_date_string(date_str: str) -> str:
     normalized_lower = normalized.lower()
     for french, english in french_to_english_months.items():
         if french in normalized_lower:
-            # Replace preserving case
+            # Replace preserving case - use word boundaries to avoid matching substrings
+            # (e.g., 'sept' should not match inside 'September')
             normalized = re.sub(
-                re.escape(french),
+                r'\b' + re.escape(french) + r'\b',
                 english,
                 normalized,
                 flags=re.IGNORECASE
             )
-            break
+            # Don't break - continue checking other months in case there are multiple
 
     return normalized

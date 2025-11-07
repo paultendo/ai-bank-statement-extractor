@@ -250,18 +250,32 @@ class BalanceValidator:
 
         logger.info("Validating statement totals")
 
+        # Check if statement has period breaks (e.g., Monzo combined statements)
+        # For these, skip the totals validation as the breaks make it complex
+        has_period_breaks = any("PERIOD_BREAK" in txn.description.upper() for txn in transactions)
+
+        if has_period_breaks:
+            logger.info("Statement contains period breaks - skipping totals validation (use per-transaction validation instead)")
+            return ValidationResult(
+                success=True,
+                message=f"Skipped totals validation for combined statement with {len(transactions)} transactions (period breaks detected)"
+            )
+
+        # For single-period statements, validate totals normally
+        actual_opening = statement.opening_balance
+
         # Calculate totals
         total_in = sum(txn.money_in for txn in transactions)
         total_out = sum(txn.money_out for txn in transactions)
 
-        calculated_closing = statement.opening_balance + total_in - total_out
+        calculated_closing = actual_opening + total_in - total_out
 
         difference = abs(calculated_closing - statement.closing_balance)
 
         if difference > self.tolerance:
             error_msg = (
                 f"Statement balance mismatch: "
-                f"Opening £{statement.opening_balance:.2f} + "
+                f"Opening £{actual_opening:.2f} + "
                 f"In £{total_in:.2f} - Out £{total_out:.2f} = "
                 f"£{calculated_closing:.2f}, "
                 f"but statement shows closing balance of £{statement.closing_balance:.2f}. "

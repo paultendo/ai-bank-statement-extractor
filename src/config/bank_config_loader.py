@@ -140,11 +140,14 @@ class BankConfigLoader:
         Returns:
             BankConfig object or None if bank cannot be detected
         """
-        text_lower = text.lower()
+        # Only check first 2000 characters (header/metadata section)
+        # This prevents false matches on transaction descriptions
+        # (e.g., transfers to "Santander" in an HSBC statement)
+        header_text = text[:2000].lower()
 
         for bank_name, config in self._configs.items():
             for identifier in config.identifiers:
-                if identifier.lower() in text_lower:
+                if identifier.lower() in header_text:
                     logger.info(f"Detected bank: {bank_name}")
                     return config
 
