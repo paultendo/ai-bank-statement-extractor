@@ -80,22 +80,30 @@ class MonzoTransactionParser(BaseTransactionParser):
             logger.error("Could not find any Personal Account or Pot sections")
             return []
 
-        # Build list of Personal Account ranges to parse (exclude Pots)
-        # Note: Pots have separate statements and balances, should not be mixed with Personal Account
+        # Build ranges for personal accounts and pots
         parse_ranges = []
+        pot_ranges = []
         for i, (start_idx, section_type) in enumerate(section_markers):
+            if i + 1 < len(section_markers):
+                end_idx = section_markers[i + 1][0]
+            else:
+                end_idx = len(lines)
+
             if section_type == 'personal':
-                # Find end of this section (next section marker or EOF)
-                if i + 1 < len(section_markers):
-                    end_idx = section_markers[i + 1][0]
-                else:
-                    end_idx = len(lines)
                 parse_ranges.append((start_idx, end_idx, section_type))
                 logger.debug(f"Personal Account range: lines {start_idx} to {end_idx}")
+            elif section_type == 'pot':
+                pot_ranges.append((start_idx, end_idx))
+                logger.debug(f"Pot statement range: lines {start_idx} to {end_idx}")
 
         if not parse_ranges:
             logger.error("No Personal Account sections found")
             return []
+
+        if pot_ranges:
+            pot_data = self._parse_pot_sections(lines, pot_ranges)
+            if pot_data:
+                self.additional_data['pots'] = pot_data
 
         # Pattern for date line - supports TWO formats:
         # 1. Complete: DD/MM/YYYY (standard Monzo format)
@@ -444,6 +452,96 @@ class MonzoTransactionParser(BaseTransactionParser):
 
         logger.info(f"✓ Parsed {len(final_transactions)} Monzo transactions (sorted chronologically, with period markers)")
         return final_transactions
+
+    def _parse_pot_sections(self, lines: List[str], pot_ranges: List[tuple]) -> List[dict]:
+        """Extract pot summaries (balance, totals, metadata) from pot statement sections."""
+        pot_summaries: List[dict] = []
+        period_pattern = re.compile(r'(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})')
+        seen_keys = set()
+
+        def extract_amount(value: Optional[str]) -> Optional[float]:
+            if not value:
+                return None
+            match = re.search(r'[+\-]?£?[\d,]+\.\d{2}', value)
+            return parse_currency(match.group(0)) if match else None
+
+        for start_idx, end_idx in pot_ranges:
+            summary = {
+                'pot_name': None,
+                'pot_type': None,
+                'pot_balance': None,
+                'total_in': None,
+                'total_out': None,
+                'period_start': None,
+                'period_end': None,
+                'has_transactions': None,
+            }
+
+            # Determine period
+            for idx in range(start_idx, min(end_idx, start_idx + 5)):
+                match = period_pattern.search(lines[idx])
+                if match:
+                    summary['period_start'] = parse_date(match.group(1), ["%d/%m/%Y"])
+                    summary['period_end'] = parse_date(match.group(2), ["%d/%m/%Y"])
+                    break
+
+            prev_text = None
+            prev_amount = None
+
+            for idx in range(start_idx, end_idx):
+                stripped = lines[idx].strip()
+                if not stripped:
+                    continue
+
+                lowered = stripped.lower()
+
+                if 'pot statement' in lowered:
+                    continue
+
+                if 'there were no transactions' in lowered:
+                    summary['has_transactions'] = False
+                    continue
+
+                if 'pot balance' in lowered and summary.get('pot_balance') is None:
+                    summary['pot_balance'] = prev_amount
+                    continue
+
+                if 'total outgoings' in lowered and summary.get('total_out') is None:
+                    summary['total_out'] = prev_amount
+                    continue
+
+                if 'total deposits' in lowered and summary.get('total_in') is None:
+                    summary['total_in'] = prev_amount
+                    continue
+
+                if lowered == 'pot type' and summary.get('pot_type') is None:
+                    summary['pot_type'] = prev_text
+                    continue
+
+                if lowered == 'pot name' and summary.get('pot_name') is None:
+                    summary['pot_name'] = prev_text
+                    continue
+
+                # Update trackers
+                amount_val = extract_amount(stripped)
+                if amount_val is not None:
+                    prev_amount = amount_val
+                else:
+                    prev_amount = None
+
+                prev_text = stripped
+
+            key = (
+                summary.get('pot_name'),
+                summary.get('period_start'),
+                summary.get('period_end')
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            pot_summaries.append(summary)
+
+        return pot_summaries
 
     def _build_monzo_transaction(
         self,

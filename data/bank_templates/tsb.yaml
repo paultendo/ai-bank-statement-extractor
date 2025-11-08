@@ -72,15 +72,19 @@ tsb:
   skip_patterns:
     - "TSB Bank plc"
     - "DV015004A-\\d+-E-TSBS"  # Document reference
-    - "^\\s*Money in\\s*$"     # Bare "Money in" (header or summary)
-    - "^\\s*Money out\\s*$"    # Bare "Money out" (header or summary)
+    - "^Money\\s*in"           # Summary line starting with Money in
+    - "^Money\\s*out"          # Summary line starting with Money out
     - "Sort Code:\\s*\\d{2}-\\d{2}-\\d{2}"  # Sort code line
     - "Account Number:\\s*\\d+"  # Account number line
-    - "Statement number:"
+    - "Statement\\s*number"      # Header on each page
     - "Easy Saver"  # Account type
     - "Your Transactions"
     - "^\\s+\\d{2}/\\d{2}/\\d{4}\\s*$"  # Bare date line
+    - "Financial\\s*Services\\s*Compensation"  # FSCS info block
+    - "FinancialServicesCompensation"
     - "covered by these schemes"
+    - "Basic information about the protection"
+    - "Easy Saver Account Summary"
 
   # Validation rules
   validation:

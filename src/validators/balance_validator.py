@@ -90,18 +90,22 @@ class BalanceValidator:
             # Check for period break marker (used by Monzo for non-contiguous periods)
             if "PERIOD_BREAK" in txn.description:
                 logger.info(f"Period break detected at transaction {i+1} - new period starts at next transaction")
-                # The NEXT transaction will establish the new period's opening balance
-                # We just skip the period break marker itself
+                if txn.balance is not None:
+                    difference = abs(calculated_balance - txn.balance)
+                    if difference > self.tolerance:
+                        logger.info(
+                            f"Resetting balance at period break: previous running £{calculated_balance:.2f}, "
+                            f"statement balance £{txn.balance:.2f} (diff £{difference:.2f})"
+                        )
+                    calculated_balance = txn.balance
                 continue
 
             # For first transaction after a period break, establish new baseline
             # Check if previous transaction was a period break
             if i > 0 and "PERIOD_BREAK" in transactions[i-1].description:
-                # First transaction of new period - its balance is already correct from the statement
-                # We need to work backwards to find what the opening balance should have been
-                calculated_balance = txn.balance - txn.money_in + txn.money_out
-                logger.info(f"New period starts: opening balance £{calculated_balance:.2f}, first txn balance £{txn.balance:.2f}")
-                # Now recalculate forward for this transaction to verify
+                period_opening = transactions[i-1].balance if transactions[i-1].balance is not None else calculated_balance
+                calculated_balance = period_opening
+                logger.info(f"New period starts: opening balance £{calculated_balance:.2f}")
                 calculated_balance += txn.money_in - txn.money_out
             else:
                 # Normal transaction - calculate expected balance
@@ -112,23 +116,34 @@ class BalanceValidator:
                 difference = abs(calculated_balance - txn.balance)
 
                 if difference > self.tolerance:
-                    error_msg = (
-                        f"Balance mismatch at transaction {i+1} "
-                        f"(date: {txn.date.strftime('%Y-%m-%d')}): "
-                        f"Expected £{calculated_balance:.2f}, "
-                        f"Got £{txn.balance:.2f}, "
-                        f"Difference: £{difference:.2f}"
+                    next_is_break = (
+                        i + 1 < len(transactions) and
+                        "PERIOD_BREAK" in transactions[i + 1].description
                     )
-                    logger.error(error_msg)
+                    if next_is_break:
+                        logger.warning(
+                            f"Balance mismatch immediately before period break at txn {i+1} - "
+                            f"resetting to statement balance £{txn.balance:.2f} (diff £{difference:.2f})"
+                        )
+                        calculated_balance = txn.balance
+                    else:
+                        error_msg = (
+                            f"Balance mismatch at transaction {i+1} "
+                            f"(date: {txn.date.strftime('%Y-%m-%d')}): "
+                            f"Expected £{calculated_balance:.2f}, "
+                            f"Got £{txn.balance:.2f}, "
+                            f"Difference: £{difference:.2f}"
+                        )
+                        logger.error(error_msg)
 
-                    return ValidationResult(
-                        success=False,
-                    message=error_msg,
-                    failed_at_index=i,
-                    expected_balance=calculated_balance,
-                    actual_balance=txn.balance,
-                    difference=difference
-                )
+                        return ValidationResult(
+                            success=False,
+                            message=error_msg,
+                            failed_at_index=i,
+                            expected_balance=calculated_balance,
+                            actual_balance=txn.balance,
+                            difference=difference
+                        )
 
             if txn.balance is not None:
                 logger.debug(

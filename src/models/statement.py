@@ -1,5 +1,5 @@
 """Bank statement metadata model."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -22,24 +22,39 @@ class Statement:
     """
     bank_name: str
     account_number: str
-    statement_start_date: datetime
-    statement_end_date: datetime
-    opening_balance: float
-    closing_balance: float
+    statement_start_date: Optional[datetime]
+    statement_end_date: Optional[datetime]
+    opening_balance: Optional[float]
+    closing_balance: Optional[float]
     currency: str = "GBP"
     account_holder: Optional[str] = None
     sort_code: Optional[str] = None
+    pots: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert statement metadata to dictionary."""
+        pot_payload = []
+        for pot in self.pots:
+            pot_payload.append({
+                'pot_name': pot.get('pot_name'),
+                'pot_type': pot.get('pot_type'),
+                'period_start': pot.get('period_start').strftime('%Y-%m-%d') if pot.get('period_start') else None,
+                'period_end': pot.get('period_end').strftime('%Y-%m-%d') if pot.get('period_end') else None,
+                'pot_balance': pot.get('pot_balance'),
+                'total_in': pot.get('total_in'),
+                'total_out': pot.get('total_out'),
+                'has_transactions': pot.get('has_transactions'),
+            })
+
         return {
             'bank_name': self.bank_name,
             'account_number': self.account_number,
             'account_holder': self.account_holder,
-            'statement_start_date': self.statement_start_date.strftime('%Y-%m-%d'),
-            'statement_end_date': self.statement_end_date.strftime('%Y-%m-%d'),
-            'opening_balance': round(self.opening_balance, 2),
-            'closing_balance': round(self.closing_balance, 2),
+            'statement_start_date': self.statement_start_date.strftime('%Y-%m-%d') if self.statement_start_date else None,
+            'statement_end_date': self.statement_end_date.strftime('%Y-%m-%d') if self.statement_end_date else None,
+            'opening_balance': round(self.opening_balance, 2) if self.opening_balance is not None else None,
+            'closing_balance': round(self.closing_balance, 2) if self.closing_balance is not None else None,
             'currency': self.currency,
-            'sort_code': self.sort_code
+            'sort_code': self.sort_code,
+            'pots': pot_payload
         }

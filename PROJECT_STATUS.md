@@ -50,65 +50,50 @@
 
 ## 🚧 In Progress / Next Steps
 
-### Phase 1: Complete Core Extraction (Priority: HIGH)
+### Phase 1: Pipeline Hardening (Priority: HIGH)
 
-1. **Transaction Parser** (src/parsers/transaction_parser.py)
-   - Regex-based parsing using bank configs
-   - Multi-line description handling
-   - Transaction type detection
-   - Confidence scoring
+1. **OCR Fallback** (src/extractors/ocr_extractor.py)
+   - Add pytesseract-based extraction step between text layer and Vision API
+   - Share preprocessing utilities across banks
+   - Surface quality metrics so Halifax-style PDFs fall back automatically
 
-2. **Balance Validator** (src/validators/balance_validator.py)
-   - Reconciliation logic
-   - Opening/closing balance validation
-   - Per-transaction balance verification
+2. **Bounding-box QA**
+   - Audit each bank config that sets `pdf_bbox`
+   - Add regression PDFs to ensure the crop doesn’t remove date/amount columns
+   - Provide a per-bank toggle/CLI flag to disable bbox if issues arise
 
-3. **Excel Exporter** (src/exporters/excel_exporter.py)
-   - Three sheets: Transactions, Metadata, Audit Log
-   - Formatting and styling
-   - Confidence highlighting
-
-4. **Main Pipeline** (src/pipeline.py)
-   - Orchestrate extraction → parsing → validation → export
-   - Strategy selection (PDF → OCR → Vision API)
-   - Error handling and fallback logic
+3. **Batch CLI Automation** (src/cli.py)
+   - Implement the `batch` subcommand end-to-end
+   - Aggregate success/failure stats and mirror README examples
 
 ### Phase 2: Enhanced Extraction (Priority: MEDIUM)
 
-5. **OCR Extractor** (src/extractors/ocr_extractor.py)
-   - Tesseract integration
-   - Image preprocessing
-   - Quality assessment
+4. **Vision API Maintenance** (src/extractors/vision_extractor.py)
+   - Improve retry/backoff handling
+   - Track per-page cost + confidence for analytics
+   - Optional OpenAI Vision backend
 
-6. **Vision API Extractor** (src/extractors/vision_extractor.py)
-   - Claude Vision integration
-   - OpenAI Vision integration
-   - Prompt engineering for accuracy
-   - Cost optimization
-
-7. **Image Preprocessing** (src/utils/image_preprocessing.py)
-   - Deskewing
-   - Denoising
-   - Contrast enhancement
-   - Binarization
+5. **Image Preprocessing Utilities** (src/utils/image_preprocessing.py)
+   - Deskew, denoise, and contrast normalize before OCR/Vision requests
+   - Share filters across OCR and Vision fallbacks
 
 ### Phase 3: Multi-Bank Support (Priority: MEDIUM)
 
-8. **Additional Bank Configs**
+6. **Additional Bank Configs**
    - Barclays
    - HSBC
    - Lloyds
    - Santander
    - Generic fallback
 
-9. **LLM Parser** (src/parsers/llm_parser.py)
+7. **LLM Parser** (src/parsers/llm_parser.py)
    - Use LLM when regex fails
    - Structured output extraction
    - Confidence scoring
 
 ### Phase 4: UI Development (Priority: MEDIUM)
 
-10. **Streamlit Web UI** (ui/streamlit_app.py)
+8. **Streamlit Web UI** (ui/streamlit_app.py)
     - File upload interface
     - Side-by-side viewer
     - Manual correction capability
@@ -117,13 +102,13 @@
 
 ### Phase 5: Testing & Refinement (Priority: HIGH)
 
-11. **Test Coverage**
+9. **Test Coverage**
     - Unit tests for all modules
     - Integration tests
     - Bank-specific test fixtures
     - End-to-end tests
 
-12. **Sample Statements**
+10. **Sample Statements**
     - Collect anonymized samples
     - Create test fixtures
     - Document edge cases
@@ -131,43 +116,37 @@
 ## 📊 Current Capabilities
 
 ### What Works Now:
-- ✅ Project structure and organization
-- ✅ Data models (Transaction, Statement, ExtractionResult)
-- ✅ PDF text extraction (pdfplumber)
-- ✅ Currency parsing (multiple formats)
-- ✅ Date parsing (multiple formats)
-- ✅ Bank configuration system
-- ✅ CLI framework
-- ✅ Logging and audit trail
-- ✅ Test infrastructure
+- ✅ Native PDF text extraction with pdftotext → pdfplumber fallback
+- ✅ Vision API fallback for scanned/photo statements (Anthropic Claude currently)
+- ✅ Transaction parsing (NatWest + other YAML-driven banks) with multi-line descriptions
+- ✅ Balance validation + reconciliation safety checks
+- ✅ Excel exporter with 3-sheet workbook and confidence highlighting
+- ✅ Extraction pipeline + CLI (`extract`, `banks`, `test`) wiring, including bbox support where configured
+- ✅ Logging/audit trail + analytics hooks
+- ✅ Streamlit UI prototype for manual review (ui/streamlit_app.py)
+- ✅ Regression-validated banks: NatWest (Statements 1-3), Halifax (Dec 24/Jan 25), HSBC (Myah Wright combined), Lloyds (Deborah Prime), Barclays (Proudfoot May 2024), Santander (CurrentAccountStatement_08022024), TSB (Savings account - Mark Wilcox), Monzo (monzo-bidmead, personal + pots)
+- ⚠️ Nationwide: Marsh Bankstatements up to April 2024 parses (695 txns) but balance reconciliation fails across bundled monthly statements.
 
 ### What Doesn't Work Yet:
-- ❌ End-to-end extraction pipeline
-- ❌ Transaction parsing from text
-- ❌ Balance validation
-- ❌ Excel export
-- ❌ OCR support
-- ❌ Vision API integration
-- ❌ Web UI
+- ❌ Local OCR fallback (pytesseract) to bridge problematic digital PDFs like Halifax
+- ❌ Fully-implemented CLI batch processing
+- ❌ Automated regression suite covering bbox changes per bank
+- ❌ Broader validation of additional UK banks beyond NatWest sample set
+- ❌ Comprehensive tests for exporters/pipeline (unit + integration)
 
-## 🎯 MVP Goals (Week 1-2)
+## 🎯 Near-Term Goals (November 2025)
 
-To achieve a working MVP that can process one NatWest statement:
+The NatWest MVP (native text + Vision fallback) is live. Next objectives focus on hardening and expanding coverage:
 
 ### Critical Path:
-1. **Transaction Parser** - Parse transactions from extracted text
-2. **Balance Validator** - Ensure accuracy
-3. **Excel Exporter** - Generate output file
-4. **Pipeline Integration** - Connect all pieces
+1. **OCR Fallback** – implement pytesseract pipeline and verify it unlocks Halifax PDFs that defeat text-layer extraction.
+2. **Batch Workflow** – deliver the CLI batch command plus regression fixtures so multi-file runs mirror real case loads.
+3. **Bounding-box Regression Set** – capture one PDF per bank to ensure future bbox tweaks don’t regress extraction.
 
-### Estimated Timeline:
-- Transaction Parser: 1-2 days
-- Balance Validator: 0.5 day
-- Excel Exporter: 1 day
-- Pipeline Integration: 1 day
-- Testing & Debugging: 1-2 days
-
-**Total: 4-6 days to working MVP**
+### Target Timeline:
+- OCR fallback prototype & Halifax validation: 3-4 days once preprocessing utilities are ready.
+- Batch command + smoke tests: 1-2 days.
+- Regression fixture harness + CI hook: 2-3 days (can overlap with batch work).
 
 ## 🚀 Quick Start (For Developers)
 
@@ -214,26 +193,24 @@ pytest tests/test_utils/test_currency_parser.py -v
 
 ## 🐛 Known Issues
 
-1. No extraction pipeline yet - CLI commands return "not implemented"
-2. Only NatWest configuration exists
-3. No OCR or Vision API support yet
-4. No web UI implemented
-5. Test coverage incomplete (only utils tested so far)
+1. Halifax (and similar) PDFs require OCR fallback; current text-layer extraction produces garbled tables.
+2. Bounding-box cropping is powerful but can silently strip columns if configs are wrong; needs regression coverage.
+3. CLI `batch` command is a stub, despite documentation claiming multi-file support.
+4. Automated tests cover utilities only; parsers, exporter, validators, and pipeline lack unit/integration coverage.
 
 ## 💡 Recommendations
 
 ### Immediate Next Steps:
-1. Implement transaction parser using regex patterns from natwest.yaml
-2. Create balance validator with reconciliation logic
-3. Build Excel exporter with proper formatting
-4. Connect everything in pipeline.py
-5. Test with actual NatWest statement
+1. Ship OCR fallback + preprocessing so Halifax PDFs extract cleanly.
+2. Finish CLI batch workflow and document the exact behaviour.
+3. Assemble per-bank regression fixtures (with and without bbox) and wire them into CI.
+4. Expand parser/exporter/validator test coverage beyond the current utility-only scope.
 
 ### Code Quality:
-- Add type hints to all functions
-- Write docstrings for all public methods
-- Add logging at key decision points
-- Create comprehensive tests
+- Add type hints to new OCR/batch surfaces
+- Keep bbox-related logic behind config flags with clear docstrings
+- Strengthen structured logging around extractor fallbacks
+- Create comprehensive tests (pipeline happy path + regression fixtures)
 
 ### Architecture Decisions:
 - Keep extraction strategies separate and pluggable

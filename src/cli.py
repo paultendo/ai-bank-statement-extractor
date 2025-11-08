@@ -26,7 +26,8 @@ def cli():
 @click.option('--format', '-f', type=click.Choice(['xlsx', 'csv']), default='xlsx', help='Output format')
 @click.option('--bank', '-b', help='Bank name (auto-detect if not specified)')
 @click.option('--use-vision', is_flag=True, help='Force use of Vision API')
-def extract(file_path, output, format, bank, use_vision):
+@click.option('--json', 'json_path', type=click.Path(), help='Optional path to write result JSON')
+def extract(file_path, output, format, bank, use_vision, json_path):
     """
     Extract transactions from a bank statement.
 
@@ -51,6 +52,7 @@ def extract(file_path, output, format, bank, use_vision):
 
     # Run extraction pipeline
     from .pipeline import ExtractionPipeline
+    import json
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
     pipeline = ExtractionPipeline()
@@ -69,6 +71,13 @@ def extract(file_path, output, format, bank, use_vision):
                 bank_name=bank,
                 perform_validation=True
             )
+
+            if json_path:
+                try:
+                    Path(json_path).write_text(json.dumps(result.to_dict(), indent=2), encoding='utf-8')
+                    console.print(f"[green]JSON result saved to {json_path}[/green]")
+                except Exception as json_exc:  # noqa: BLE001
+                    console.print(f"[yellow]![/yellow] Failed to write JSON: {json_exc}")
 
             if result.success:
                 console.print(f"\n[green]✓ Extraction successful![/green]")

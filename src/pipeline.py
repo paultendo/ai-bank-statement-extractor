@@ -8,6 +8,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
+import re
 from datetime import datetime
 
 from .models import ExtractionResult, Statement
@@ -33,6 +34,8 @@ class ExtractionPipeline:
 
     Based on Monopoly's pipeline.py with our architecture.
     """
+
+    AMOUNT_PATTERN = re.compile(r'^-?£?[\d,]+\.\d{2}$')
 
     def __init__(self):
         """Initialize pipeline with extractors and parsers."""
@@ -89,16 +92,36 @@ class ExtractionPipeline:
                     processing_time=time.time() - start_time
                 )
 
-            # 2a.1. Re-extract with bbox if bank config specifies one
-            # This allows excluding info boxes or other unwanted regions
-            # Use pdfplumber with bbox for precise region extraction
-            pdf_bbox = bank_config._config.get('pdf_bbox')
-            if pdf_bbox and file_path.suffix.lower() == '.pdf':
-                logger.info(f"Bank config has pdf_bbox, re-extracting with pdfplumber cropping: {pdf_bbox}")
+            # 2a.1. Re-extract with pdfplumber if bank config requires custom settings
+            pdf_bbox = self._resolve_pdf_bbox(file_path, bank_config)
+            pdfplumber_laparams = bank_config.pdfplumber_laparams
+            pdfplumber_text_kwargs = bank_config.pdfplumber_text_kwargs
+
+            needs_pdfplumber = any([pdf_bbox, pdfplumber_laparams, pdfplumber_text_kwargs])
+
+            if needs_pdfplumber and file_path.suffix.lower() == '.pdf':
+                if pdf_bbox:
+                    logger.info(f"Bank config has pdf_bbox, re-extracting with pdfplumber cropping: {pdf_bbox}")
+                if pdfplumber_laparams:
+                    logger.info(f"Bank config specifies pdfplumber LAParams override: {pdfplumber_laparams}")
+                if pdfplumber_text_kwargs:
+                    logger.info(f"Bank config specifies pdfplumber text extraction kwargs: {pdfplumber_text_kwargs}")
                 try:
-                    text, extraction_confidence = self.pdf_extractor.extract(file_path, bbox=pdf_bbox)
-                    extraction_method = "pdfplumber+bbox"
-                    logger.info(f"✓ Re-extracted with bbox cropping")
+                    text, extraction_confidence = self.pdf_extractor.extract(
+                        file_path,
+                        bbox=pdf_bbox,
+                        laparams=pdfplumber_laparams,
+                        text_kwargs=pdfplumber_text_kwargs
+                    )
+                    method_parts = ["pdfplumber"]
+                    if pdf_bbox:
+                        method_parts.append("bbox")
+                    if pdfplumber_laparams:
+                        method_parts.append("laparams")
+                    if pdfplumber_text_kwargs:
+                        method_parts.append("text")
+                    extraction_method = "+".join(method_parts)
+                    logger.info(f"✓ Re-extracted with pdfplumber ({' + '.join(method_parts[1:]) if len(method_parts) > 1 else 'default settings'})")
                 except Exception as e:
                     logger.warning(f"Bbox re-extraction failed, using original text: {e}")
 
@@ -362,6 +385,70 @@ class ExtractionPipeline:
 
         return "", 0.0, "none"
 
+    def _resolve_pdf_bbox(self, file_path: Path, bank_config: BankConfig) -> Optional[dict]:
+        """
+        Resolve static or dynamic pdf bbox overrides for a bank.
+        """
+        pdf_bbox = bank_config.pdf_bbox
+        strategy = bank_config.pdf_bbox_strategy
+
+        if strategy and file_path.suffix.lower() == '.pdf':
+            dynamic_bbox = self._compute_dynamic_bbox(file_path, strategy)
+            if dynamic_bbox:
+                pdf_bbox = dynamic_bbox
+
+        return pdf_bbox
+
+    def _compute_dynamic_bbox(self, file_path: Path, strategy: dict) -> Optional[dict]:
+        """
+        Compute a dynamic bounding box based on PDF content (e.g., last amount column).
+        """
+        strategy_type = strategy.get('type')
+        if strategy_type != "dynamic_amount_x1":
+            logger.warning(f"Unsupported pdf_bbox_strategy type: {strategy_type}")
+            return None
+
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            logger.warning(f"pdfplumber not available for dynamic bbox: {exc}")
+            return None
+
+        margin = strategy.get('margin', 10)
+        x0 = strategy.get('x0', 0)
+        top = strategy.get('top', 0)
+        bottom = strategy.get('bottom')
+
+        max_amount_x1 = 0.0
+        max_page_width = 0.0
+
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    max_page_width = max(max_page_width, page.width)
+                    words = page.extract_words(x_tolerance=1.0, use_text_flow=True)
+                    for word in words:
+                        text = word.get('text', '').replace(',', '').replace('£', '')
+                        if self.AMOUNT_PATTERN.match(text):
+                            max_amount_x1 = max(max_amount_x1, word['x1'])
+        except Exception as exc:
+            logger.warning(f"Failed to compute dynamic bbox for {file_path.name}: {exc}")
+            return None
+
+        if max_amount_x1 == 0.0 or max_page_width == 0.0:
+            logger.warning("Dynamic bbox: no amount columns detected; skipping override")
+            return None
+
+        x1 = min(max_page_width, max_amount_x1 + margin)
+        bbox = {
+            'x0': x0,
+            'top': top,
+            'x1': x1,
+            'bottom': bottom
+        }
+        logger.info(f"Dynamic bbox computed for {file_path.name}: x1={x1:.2f} (max amount {max_amount_x1:.2f} + margin {margin})")
+        return bbox
+
     def _detect_bank(
         self,
         text: str,
@@ -436,6 +523,10 @@ class ExtractionPipeline:
                             break
                 if value is None:
                     value = match.group(0)
+                if isinstance(value, str):
+                    value = re.sub(r'(\d)([A-Za-z])', r'\1 \2', value)
+                    value = re.sub(r'([A-Za-z])(\d)', r'\1 \2', value)
+                    value = re.sub(r'\s+', ' ', value).strip()
                 extracted[field_name] = value
                 logger.debug(f"Found {field_name}: {extracted[field_name]}")
 
@@ -492,12 +583,13 @@ class ExtractionPipeline:
                     return None
 
             # Balances
-            opening_balance = parse_currency(extracted.get('previous_balance', '0'))
-            closing_balance = parse_currency(extracted.get('new_balance', '0'))
+            opening_balance = parse_currency(extracted.get('previous_balance'))
+            closing_balance = parse_currency(extracted.get('new_balance'))
 
-            if opening_balance is None or closing_balance is None:
-                logger.error("Could not parse statement balances")
-                return None
+            if opening_balance is None:
+                opening_balance = 0.0
+            if closing_balance is None:
+                closing_balance = 0.0
 
             # Check if this is a combined statement with multiple periods
             # For combined statements, expand date range to cover all periods
@@ -703,6 +795,12 @@ class ExtractionPipeline:
             statement_start_date=statement.statement_start_date,
             statement_end_date=statement.statement_end_date
         )
+
+        additional_data = parser.get_additional_data()
+        if statement and additional_data:
+            pots = additional_data.get('pots')
+            if pots:
+                statement.pots = pots
 
         logger.info(f"✓ Parsed {len(transactions)} transactions")
         return transactions

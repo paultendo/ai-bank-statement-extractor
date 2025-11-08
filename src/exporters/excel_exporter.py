@@ -76,6 +76,7 @@ class ExcelExporter:
             confidence_threshold
         )
         self._create_metadata_sheet(wb, result)
+        self._create_pots_sheet(wb, result)
         self._create_audit_log_sheet(wb, result)
 
         # Save workbook
@@ -247,6 +248,11 @@ class ExcelExporter:
         currency_symbol = currency_symbols.get(stmt.currency.upper(), stmt.currency)
 
         # Metadata rows
+        start_date_str = stmt.statement_start_date.strftime("%Y-%m-%d") if stmt.statement_start_date else "N/A"
+        end_date_str = stmt.statement_end_date.strftime("%Y-%m-%d") if stmt.statement_end_date else "N/A"
+        opening_str = f"{currency_symbol}{stmt.opening_balance:,.2f}" if stmt.opening_balance is not None else "N/A"
+        closing_str = f"{currency_symbol}{stmt.closing_balance:,.2f}" if stmt.closing_balance is not None else "N/A"
+
         metadata = [
             ("Bank Name", stmt.bank_name),
             ("Account Number", stmt.account_number),
@@ -255,12 +261,12 @@ class ExcelExporter:
             ("Currency", stmt.currency),
             ("", ""),
             ("Statement Period", ""),
-            ("  Start Date", stmt.statement_start_date.strftime("%Y-%m-%d")),
-            ("  End Date", stmt.statement_end_date.strftime("%Y-%m-%d")),
+            ("  Start Date", start_date_str),
+            ("  End Date", end_date_str),
             ("", ""),
             ("Balances", ""),
-            ("  Opening Balance", f"{currency_symbol}{stmt.opening_balance:,.2f}"),
-            ("  Closing Balance", f"{currency_symbol}{stmt.closing_balance:,.2f}"),
+            ("  Opening Balance", opening_str),
+            ("  Closing Balance", closing_str),
             ("", ""),
             ("Transaction Count", len(result.transactions)),
             ("Extraction Method", result.extraction_method),
@@ -295,6 +301,63 @@ class ExcelExporter:
         # Auto-size columns
         ws.column_dimensions['A'].width = 25
         ws.column_dimensions['B'].width = 30
+
+    def _create_pots_sheet(
+        self,
+        wb: openpyxl.Workbook,
+        result: ExtractionResult
+    ) -> None:
+        """Create optional pot summary sheet."""
+        statement = result.statement
+        if not statement or not getattr(statement, 'pots', None):
+            return
+
+        ws = wb.create_sheet("Pot Summaries", 2)
+        headers = [
+            "Pot Name",
+            "Pot Type",
+            "Period Start",
+            "Period End",
+            "Balance",
+            "Total In",
+            "Total Out",
+            "Has Transactions"
+        ]
+
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill(start_color=self.HEADER_COLOR, fill_type="solid")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        currency_format = self._get_currency_format(result)
+
+        for row_idx, pot in enumerate(statement.pots, start=2):
+            ws.cell(row=row_idx, column=1, value=pot.get('pot_name'))
+            ws.cell(row=row_idx, column=2, value=pot.get('pot_type'))
+
+            period_start = pot.get('period_start')
+            period_end = pot.get('period_end')
+            ws.cell(row=row_idx, column=3, value=period_start.strftime("%Y-%m-%d") if period_start else None)
+            ws.cell(row=row_idx, column=4, value=period_end.strftime("%Y-%m-%d") if period_end else None)
+
+            balance_cell = ws.cell(row=row_idx, column=5, value=pot.get('pot_balance'))
+            total_in_cell = ws.cell(row=row_idx, column=6, value=pot.get('total_in'))
+            total_out_cell = ws.cell(row=row_idx, column=7, value=pot.get('total_out'))
+
+            for cell in (balance_cell, total_in_cell, total_out_cell):
+                if cell.value is not None:
+                    cell.number_format = currency_format
+
+            has_txn = pot.get('has_transactions')
+            if has_txn is None:
+                # Default to False if both totals are zero
+                totals = (pot.get('total_in') or 0) + (pot.get('total_out') or 0)
+                has_txn = totals > 0
+            ws.cell(row=row_idx, column=8, value="Yes" if has_txn else "No")
+
+        for col in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(col)].width = 18
 
     def _create_audit_log_sheet(
         self,

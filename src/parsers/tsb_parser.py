@@ -67,8 +67,9 @@ class TSBParser(BaseTransactionParser):
         )
 
         # Pattern for opening/closing balance
-        opening_balance_pattern = re.compile(r'STATEMENT OPENING BALANCE', re.IGNORECASE)
-        closing_balance_pattern = re.compile(r'STATEMENT CLOSING BALANCE', re.IGNORECASE)
+        opening_balance_pattern = re.compile(r'STATEMENT\s+OPENING\s+BALANCE', re.IGNORECASE)
+        # Some PDFs render this without spaces ("STATEMENTCLOSINGBALANCE"), so allow optional whitespace
+        closing_balance_pattern = re.compile(r'STATEMENT\s*CLOSING\s*BALANCE', re.IGNORECASE)
 
         # Payment type pattern
         payment_type_pattern = re.compile(
@@ -117,6 +118,45 @@ class TSBParser(BaseTransactionParser):
         while idx < len(lines):
             line = lines[idx]
 
+            # Closing balance appears at the end of the statement and should halt parsing
+            if closing_balance_pattern.search(line):
+                logger.debug("Found statement closing balance - stopping transaction processing")
+                break
+
+            # Opening balance line needs to be handled even if it matches skip patterns
+            if opening_balance_pattern.search(line):
+                amounts_with_pos = []
+                for match in amount_pattern.finditer(line):
+                    amt_str = match.group(1)
+                    pos = match.start()
+                    if pos >= 90:  # Only amounts in amount columns
+                        amounts_with_pos.append((amt_str, pos))
+
+                if amounts_with_pos and statement_start_date:
+                    # Use statement start for BROUGHT FORWARD date when available
+                    opening_date = statement_start_date
+                else:
+                    opening_date = current_date
+
+                if amounts_with_pos and opening_date:
+                    balance = parse_currency(amounts_with_pos[-1][0]) or 0.0
+
+                    transaction = Transaction(
+                        date=opening_date,
+                        description="BROUGHT FORWARD",
+                        money_in=0.0,
+                        money_out=0.0,
+                        balance=balance,
+                        transaction_type=None,
+                        confidence=100.0,
+                        raw_text=line[:100]
+                    )
+                    transactions.append(transaction)
+                    logger.debug(f"Added opening balance: £{balance:.2f}")
+
+                idx += 1
+                continue
+
             # Skip footers, headers, and other non-transaction lines
             # Uses shared skip patterns plus TSB-specific ones
             if self._is_skip_line(line):
@@ -158,39 +198,7 @@ class TSBParser(BaseTransactionParser):
                 current_payment_type = payment_type_match.group(1)
                 logger.debug(f"Found payment type: {current_payment_type}")
 
-            # Check for opening balance
-            if opening_balance_pattern.search(line):
-                amounts_with_pos = []
-                for match in amount_pattern.finditer(line):
-                    amt_str = match.group(1)
-                    pos = match.start()
-                    if pos >= 90:  # Only amounts in amount columns
-                        amounts_with_pos.append((amt_str, pos))
-
-                if amounts_with_pos and current_date:
-                    balance = parse_currency(amounts_with_pos[-1][0]) or 0.0
-
-                    transaction = Transaction(
-                        date=current_date,
-                        description="BROUGHT FORWARD",
-                        money_in=0.0,
-                        money_out=0.0,
-                        balance=balance,
-                        transaction_type=None,
-                        confidence=100.0,
-                        raw_text=line[:100]
-                    )
-                    transactions.append(transaction)
-                    logger.debug(f"Added opening balance: £{balance:.2f}")
-
-                idx += 1
-                continue
-
-            # Skip closing balance summary line - and STOP processing after it
-            if closing_balance_pattern.search(line):
-                logger.debug("Found statement closing balance - stopping transaction processing")
-                # All transactions have been processed, everything after this is just informational pages
-                break
+            # (Opening balance handled earlier)
 
             # Check if line has amounts (indicates transaction line)
             amounts_with_pos = []

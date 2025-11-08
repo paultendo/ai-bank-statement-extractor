@@ -14,8 +14,8 @@ nationwide:
     account_number: "Account no\\s+(\\d+)"
     # Sort code: "Sort code                          07-10-96"
     sort_code: "Sort code\\s+(\\d{2}-\\d{2}-\\d{2})"
-    # Statement date from header: "Statement                           09 February 2025"
-    statement_date: "Statement\\s+(\\d{2}\\s+\\w+\\s+\\d{4})"
+    # Statement date from header: "Statement date: 23 March 2023"
+    statement_date: "Statement(?:\\s*date:|date:)?\\s*(\\d{1,2}\\s*[A-Za-z]+\\s*\\d{4})"
     # Start balance: "Start balance                        £49.50"
     previous_balance: "Start balance\\s+£([\\d,]+\\.\\d{2})"
     # End balance: "End balance                          £316.17"
@@ -86,15 +86,15 @@ nationwide:
     - "Your.*transactions"
     - "Balance from statement \\d+"
 
-  # PDF extraction settings
-  # Bounding box to exclude info box on right side (x0, top, x1, bottom)
-  # Nationwide has an info box starting around x=450 that contains example text
-  # Set x1 to 450 to extract only the main transaction area
-  pdf_bbox:
+  pdf_bbox_strategy:
+    type: "dynamic_amount_x1"
+    margin: 15  # keep real columns plus small padding
     x0: 0
     top: 0
-    x1: 450  # Exclude info box on right (starts around x=450)
-    bottom: null  # null means use full page height
+    bottom: null
+
+  pdfplumber_text_kwargs:
+    x_tolerance: 1.0
 
   validation:
     balance_tolerance: 0.01

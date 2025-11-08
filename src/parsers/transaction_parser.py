@@ -117,6 +117,10 @@ class TransactionParser:
             statement_end_date
         )
 
+    def get_additional_data(self) -> dict:
+        """Expose supplemental data gathered by bank-specific parser."""
+        return getattr(self._parser, 'additional_data', {})
+
     @property
     def bank_name(self) -> str:
         """Get the bank name for this parser."""

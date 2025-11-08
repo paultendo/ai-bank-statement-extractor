@@ -42,7 +42,13 @@ class PDFExtractor(BaseExtractor):
         """
         return file_path.suffix.lower() == '.pdf'
 
-    def extract(self, file_path: Path, bbox: Optional[dict] = None) -> tuple[str, float]:
+    def extract(
+        self,
+        file_path: Path,
+        bbox: Optional[dict] = None,
+        laparams: Optional[dict] = None,
+        text_kwargs: Optional[dict] = None
+    ) -> tuple[str, float]:
         """
         Extract text from PDF using pdfplumber.
 
@@ -69,11 +75,22 @@ class PDFExtractor(BaseExtractor):
             else:
                 logger.info(f"Extracting text from PDF: {file_path}")
 
+            if laparams:
+                logger.debug(f"Using custom pdfplumber LAParams: {laparams}")
+
+            text_kwargs = text_kwargs or {}
+            if text_kwargs:
+                logger.debug(f"Using custom pdfplumber text kwargs: {text_kwargs}")
+
             all_text = []
             total_pages = 0
             pages_with_text = 0
 
-            with pdfplumber.open(file_path) as pdf:
+            open_kwargs = {}
+            if laparams:
+                open_kwargs['laparams'] = laparams
+
+            with pdfplumber.open(file_path, **open_kwargs) as pdf:
                 total_pages = len(pdf.pages)
                 logger.debug(f"PDF has {total_pages} pages")
 
@@ -89,10 +106,10 @@ class PDFExtractor(BaseExtractor):
 
                         bbox_tuple = (x0, top, x1, bottom)
                         cropped_page = page.within_bbox(bbox_tuple)
-                        text = cropped_page.extract_text()
+                        text = cropped_page.extract_text(**text_kwargs)
                         logger.debug(f"Page {page_num}: Cropped to bbox {bbox_tuple}")
                     else:
-                        text = page.extract_text()
+                        text = page.extract_text(**text_kwargs)
 
                     if text and text.strip():
                         all_text.append(f"--- Page {page_num} ---\n{text}")

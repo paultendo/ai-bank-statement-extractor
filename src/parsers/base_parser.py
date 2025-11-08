@@ -232,8 +232,6 @@ class BaseTransactionParser(ABC):
         r'Registered Office',
         r'Head Office',
         r'www\.',
-        r'\.com',
-        r'\.co\.uk',
 
         # Summary/totals lines
         r'^\s*TOTALS\s*$',
@@ -271,6 +269,8 @@ class BaseTransactionParser(ABC):
         self.paid_in_pos = None
         self.withdrawn_pos = None
         self.header_line_idx = None
+        # Bank-specific parsers can stash supplemental data here (e.g., pot summaries)
+        self.additional_data: dict = {}
 
     def _compile_pattern(self) -> Optional[re.Pattern]:
         """

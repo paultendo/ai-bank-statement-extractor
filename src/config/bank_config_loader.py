@@ -1,5 +1,6 @@
 """Load and manage bank-specific configurations."""
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Optional, List
 import yaml
@@ -48,6 +49,11 @@ class BankConfig:
         return self._config.get('transaction_types', {})
 
     @property
+    def skip_patterns(self) -> List[str]:
+        """Get bank-specific skip patterns."""
+        return self._config.get('skip_patterns', [])
+
+    @property
     def validation(self) -> Dict:
         """Get validation rules."""
         return self._config.get('validation', {})
@@ -62,6 +68,26 @@ class BankConfig:
         """Get currency code (e.g., 'GBP', 'EUR', 'BRL')."""
         return self._config.get('currency', 'GBP')
 
+    @property
+    def pdfplumber_laparams(self) -> Optional[dict]:
+        """Custom pdfplumber LAParams overrides."""
+        return self._config.get('pdfplumber_laparams')
+
+    @property
+    def pdfplumber_text_kwargs(self) -> Optional[dict]:
+        """Custom keyword args for pdfplumber text extraction (e.g., x_tolerance)."""
+        return self._config.get('pdfplumber_text_kwargs')
+
+    @property
+    def pdf_bbox(self) -> Optional[dict]:
+        """Static pdf bbox override."""
+        return self._config.get('pdf_bbox')
+
+    @property
+    def pdf_bbox_strategy(self) -> Optional[dict]:
+        """Dynamic pdf bbox strategy configuration."""
+        return self._config.get('pdf_bbox_strategy')
+
     def get(self, key: str, default=None):
         """Get any config value by key."""
         return self._config.get(key, default)
@@ -69,6 +95,32 @@ class BankConfig:
 
 class BankConfigLoader:
     """Loads and manages bank configurations."""
+
+    # Ordered longest→shortest so specific challenger ranges win before legacy prefixes
+    SORT_CODE_PREFIXES = [
+        ('608371', 'starling'),   # Starling universal sort code
+        ('608407', 'chase'),      # JPMorgan Chase UK (uses NatWest clearing)
+        ('040075', 'revolut'),    # Revolut/Modulr GBP accounts
+        ('040004', 'monzo'),      # Monzo classic range
+        ('040003', 'monzo'),
+        ('04', 'monzo'),          # Other Monzo ranges (fallback)
+        ('09', 'santander'),      # Santander / ex-Abbey/Girobank
+        ('07', 'nationwide'),     # Nationwide Building Society
+        ('08', 'nationwide'),
+        ('11', 'halifax'),
+        ('12', 'halifax'),
+        ('15', 'halifax'),
+        ('20', 'barclays'),
+        ('30', 'lloyds'),
+        ('31', 'lloyds'),
+        ('40', 'hsbc'),
+        ('50', 'natwest'),
+        ('60', 'natwest'),
+        ('61', 'natwest'),
+        ('62', 'natwest'),
+        ('82', 'virgin'),         # Virgin Money (Clydesdale/Yorkshire)
+        ('83', 'natwest'),        # RBS shares NatWest parser
+    ]
 
     def __init__(self, config_dir: Path = BANK_TEMPLATES_DIR):
         """
@@ -141,8 +193,6 @@ class BankConfigLoader:
             BankConfig object or None if bank cannot be detected
         """
         # Only check first 2000 characters (header/metadata section)
-        # This prevents false matches on transaction descriptions
-        # (e.g., transfers to "Santander" in an HSBC statement)
         header_text = text[:2000].lower()
 
         for bank_name, config in self._configs.items():
@@ -150,6 +200,25 @@ class BankConfigLoader:
                 if identifier.lower() in header_text:
                     logger.info(f"Detected bank: {bank_name}")
                     return config
+
+        # Fallback: derive bank from sort code prefix when present
+        sort_code_match = re.search(
+            r'sort\s*code\s*:?\s*(\d{2}[-\s]?\d{2}[-\s]?\d{2})',
+            text[:5000],
+            re.IGNORECASE
+        )
+
+        if sort_code_match:
+            digits = re.sub(r'\D', '', sort_code_match.group(1))
+            for prefix, mapped_bank in self.SORT_CODE_PREFIXES:
+                if digits.startswith(prefix):
+                    config = self._configs.get(mapped_bank)
+                    if config:
+                        logger.info(
+                            f"Detected bank via sort code prefix {prefix}: {mapped_bank}"
+                        )
+                        return config
+                    break
 
         logger.warning("Could not detect bank from statement")
         return None

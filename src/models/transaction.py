@@ -40,7 +40,7 @@ class Transaction:
     description: str
     money_in: float
     money_out: float
-    balance: float
+    balance: Optional[float]
     transaction_type: Optional[TransactionType] = None
     confidence: float = 100.0
     raw_text: Optional[str] = None
@@ -63,7 +63,7 @@ class Transaction:
             'description': self.description,
             'money_in': round(self.money_in, 2),
             'money_out': round(self.money_out, 2),
-            'balance': round(self.balance, 2),
+            'balance': round(self.balance, 2) if self.balance is not None else None,
             'transaction_type': self.transaction_type.value if self.transaction_type else None,
             'confidence': round(self.confidence, 2),
             'page_number': self.page_number

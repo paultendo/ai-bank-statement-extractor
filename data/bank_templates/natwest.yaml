@@ -9,6 +9,7 @@ natwest:
     - "RBS"
     - "Royal Bank of Scotland"
     - "RBOSGB2L"  # RBS BIC code
+    - "www.natwest.com"
   
   # Statement header fields
   header_patterns:
