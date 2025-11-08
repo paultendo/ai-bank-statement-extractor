@@ -16,10 +16,11 @@
 - **Bank APP Reimbursement Claims** - supporting complaints under PSR regulations (October 2024) and CRM code
 
 ### Key Features
-✅ Multi-format support (native PDFs, scanned PDFs, images)  
+✅ Native PDF text-layer extraction with pdfplumber/pdftotext  
+✅ Vision API fallback for scanned or photo-based statements  
 ✅ Multi-bank compatibility (Barclays, HSBC, Lloyds, NatWest, etc.)  
-✅ Intelligent extraction (text extraction → OCR → Vision API)  
-✅ High accuracy (95%+ on transaction data)  
+✅ Intelligent extraction pipeline (text extraction → Vision fallback, OCR planned)  
+✅ High accuracy (95%+ on NatWest combined statements)  
 ✅ Confidence scoring and manual review workflow  
 ✅ Legal compliance (audit trail, data validation)  
 ✅ Structured output (Excel/CSV with metadata)
@@ -30,8 +31,10 @@
 
 ### Prerequisites
 - Python 3.10 or higher
-- Tesseract OCR (for scanned documents)
-- Claude or OpenAI API key (for Vision API fallback)
+- Claude or OpenAI API key (for Vision API fallback on scans/photos)
+- (Optional / roadmap) Tesseract OCR once local OCR mode lands
+
+> **Note:** We currently rely on native PDF text extraction plus the Vision API fallback. Local OCR via Tesseract is planned but not yet wired into the pipeline.
 
 ### Installation
 
@@ -65,9 +68,9 @@ cp .env.example .env
 python -m src.cli extract statement.pdf --output transactions.xlsx
 
 # Batch process multiple statements
-python -m src.cli extract statements/*.pdf --batch --output-dir ./results
+python -m src.cli batch statements/ --output-dir ./results
 
-# Use Vision API for poor quality scans
+# Force Vision API for poor quality scans/photos
 python -m src.cli extract scanned_statement.jpg --use-vision
 ```
 
@@ -111,9 +114,9 @@ Input (PDF/Image)
 Document Analyzer (determines format & quality)
     ↓
 Extraction Strategy Selection
-    ├─ Text Extraction (fast, native PDFs)
-    ├─ OCR (scanned documents)
-    └─ Vision API (poor quality, complex layouts)
+    ├─ Native text extraction (pdfplumber/pdftotext)
+    ├─ Vision API (poor quality scans/photos)
+    └─ OCR (planned roadmap item)
     ↓
 Bank Format Detection (Barclays, HSBC, Lloyds, etc.)
     ↓
@@ -154,14 +157,19 @@ We recently completed a major refactoring of the parser architecture to improve 
 
 ## Supported Banks (UK)
 
-Currently supported:
-- ✅ Barclays Bank
-- ✅ HSBC UK Bank
-- ✅ Lloyds Bank
-- ✅ NatWest
-- ✅ Santander UK
+| Bank | Status | Notes |
+|------|--------|-------|
+| NatWest | ✅ Validated on combined statements (Statements 1-3) | 1,000+ txns, BROUGHT FORWARD handling |
+| Halifax | ✅ Validated on Dec 24 & Jan 25 native PDFs | OCR fallback still pending for scans |
+| HSBC | ✅ Validated on “HSBC Combined Statements for Myah Wright” | 195 txns, combined period |
+| Lloyds | ✅ Validated on “Lloyds – Deborah Prime” | 79 txns, Jan 2023 period |
+| Barclays | ✅ Validated on Proudfoot May 2024 statement | 78 txns, inferred period |
+| Santander | ✅ Validated on CurrentAccountStatement_08022024.pdf | 212 txns, Feb 2024 period |
+| TSB | ✅ Validated on “TSB Savings account - Mark Wilcox.pdf” | 31 txns, Oct 2023–Sep 2024 |
+| Monzo | ✅ Validated on “monzo-bidmead.pdf” | 1,035 txns, May–Oct 2024 combined + pot summaries |
+| Nationwide | ⚠️ “Marsh Bankstatements up to April 2024.pdf” | 695 txns Jan–Dec 2023, multi-statement balance mismatch |
 
-Easily extensible to other banks via YAML configuration files.
+Additional banks can be enabled quickly by adding YAML configurations and regression fixtures.
 
 ---
 
@@ -181,7 +189,7 @@ Easily extensible to other banks via YAML configuration files.
 - [x] Technical architecture designed
 - [x] Development brief created
 - [x] Core extraction pipeline implemented
-- [x] Multi-strategy PDF processing (text, OCR, Vision API)
+- [x] Multi-strategy PDF processing (native text + Vision fallback today, OCR planned)
 - [x] Excel output generation with metadata
 - [x] Balance validation and reconciliation
 - [x] Bank format detection system
@@ -211,17 +219,17 @@ Easily extensible to other banks via YAML configuration files.
 - ✅ PDF region exclusion via bounding box (cleaner extraction)
 - ✅ Robust balance handling for transactions with/without balances
 
-### Phase 3: Enhanced Extraction ✅ COMPLETE
-- [x] OCR support for scanned documents (Tesseract)
-- [x] Image file support (JPEG/PNG)
-- [x] Claude Vision API integration (fallback for poor quality)
+### Phase 3: Enhanced Extraction 🚧 IN PROGRESS
+- [ ] OCR support for scanned documents (Tesseract pipeline)
+- [x] Image/scan support via Claude Vision API fallback
+- [x] JPEG/PNG ingestion routed through Vision API
 - [x] Multi-bank format support (6 UK banks)
 - [x] Confidence scoring per transaction
-- [x] Cascading extraction strategy (text → OCR → Vision API)
+- [x] Cascading extraction strategy (native text → Vision API, OCR planned)
 
 ### Phase 4: UI & Validation 🔄 PARTIAL
 - [x] CLI interface with rich output
-- [x] Batch processing capability
+- [ ] Batch processing capability (CLI stub exists)
 - [ ] Web interface (Streamlit) - framework in place
 - [ ] Manual review and correction workflow
 - [ ] Case/client management
