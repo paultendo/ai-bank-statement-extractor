@@ -126,6 +126,32 @@ Excel/CSV Output + Review Interface
 
 ---
 
+## Recent Updates (November 2024)
+
+### Parser Architecture Refactoring
+We recently completed a major refactoring of the parser architecture to improve maintainability and reduce code duplication:
+
+**Achievements:**
+- **40 lines saved** in Nationwide parser alone (276→236 LOC, 14% reduction)
+- Eliminated duplicate parsing logic across 6 bank parsers
+- Centralized configuration in YAML files for easier bank format updates
+- Added PDF bounding box support to exclude unwanted regions (info boxes, headers)
+- Implemented universal column detection with right-aligned amount support
+- Fixed balance calculation bugs for transactions without balances
+
+**Key Features:**
+- **BaseTransactionParser**: Universal base class with shared date/description/amount extraction patterns
+- **YAML-Driven Config**: Skip patterns, column detection settings, and PDF bbox all configurable per bank
+- **Smart Column Detection**: Automatic detection of right-aligned amounts with configurable thresholds
+- **PDF Region Filtering**: Crop out info boxes and headers at extraction level using pdfplumber's bbox feature
+
+**Next Steps:**
+- Refactor Barclays and HSBC parsers using the new base class patterns
+- Measure total LOC reduction across all parsers
+- Add bbox support to other banks with problematic layouts
+
+---
+
 ## Supported Banks (UK)
 
 Currently supported:
@@ -150,33 +176,61 @@ Easily extensible to other banks via YAML configuration files.
 
 ## Development Status
 
-### Phase 1: MVP ✅ (Ready for Development)
+### Phase 1: Core Extraction Pipeline ✅ COMPLETE
 - [x] Project specification complete
 - [x] Technical architecture designed
 - [x] Development brief created
-- [ ] Core extraction pipeline
-- [ ] Basic PDF processing
-- [ ] Excel output generation
-- [ ] Balance validation
+- [x] Core extraction pipeline implemented
+- [x] Multi-strategy PDF processing (text, OCR, Vision API)
+- [x] Excel output generation with metadata
+- [x] Balance validation and reconciliation
+- [x] Bank format detection system
+- [x] Multi-bank parser support (Barclays, HSBC, Lloyds, TSB, Monzo, Nationwide)
 
-### Phase 2: Enhanced Extraction 🔄 (Planned)
-- [ ] OCR support for scanned documents
-- [ ] Image file support (JPEG/PNG)
-- [ ] Claude/GPT Vision API integration
-- [ ] Multi-bank format support
-- [ ] Confidence scoring
+### Phase 2: Parser Architecture Refactoring 🔄 IN PROGRESS
+**What We've Done:**
+- [x] Created universal `BaseTransactionParser` with shared extraction patterns
+- [x] Extracted common date/description/amount parsing to base class
+- [x] Implemented YAML-driven configuration for all bank parsers
+- [x] Refactored Nationwide parser (40 lines saved, 276→236 LOC)
+- [x] Added PDF bounding box support for excluding unwanted regions (info boxes)
+- [x] Fixed balance calculation to handle transactions without balances
+- [x] Implemented universal column detection with right-aligned amount support
 
-### Phase 3: UI & Review Workflow 📋 (Planned)
-- [ ] Web interface (Streamlit/Flask)
-- [ ] Manual review and correction
-- [ ] Batch processing
+**What's Next:**
+- [ ] Refactor Barclays parser to use BaseTransactionParser patterns
+- [ ] Refactor HSBC parser to use BaseTransactionParser patterns
+- [ ] Test all refactored parsers for accuracy
+- [ ] Measure and document LOC reduction across all parsers
+- [ ] Add bbox support to other banks with info boxes/headers
+
+**Technical Debt Addressed:**
+- ✅ Eliminated code duplication across bank parsers (DRY principle)
+- ✅ Centralized skip patterns in YAML configs (maintainability)
+- ✅ Universal column detection with configurable right-alignment
+- ✅ PDF region exclusion via bounding box (cleaner extraction)
+- ✅ Robust balance handling for transactions with/without balances
+
+### Phase 3: Enhanced Extraction ✅ COMPLETE
+- [x] OCR support for scanned documents (Tesseract)
+- [x] Image file support (JPEG/PNG)
+- [x] Claude Vision API integration (fallback for poor quality)
+- [x] Multi-bank format support (6 UK banks)
+- [x] Confidence scoring per transaction
+- [x] Cascading extraction strategy (text → OCR → Vision API)
+
+### Phase 4: UI & Validation 🔄 PARTIAL
+- [x] CLI interface with rich output
+- [x] Batch processing capability
+- [ ] Web interface (Streamlit) - framework in place
+- [ ] Manual review and correction workflow
 - [ ] Case/client management
 
-### Phase 4: Production Hardening 🔒 (Planned)
-- [ ] Comprehensive testing
-- [ ] Security audit
-- [ ] Performance optimization
-- [ ] Deployment packaging
+### Phase 5: Production Hardening 📋 PLANNED
+- [ ] Comprehensive test suite (unit + integration)
+- [ ] Security audit (API key handling, data privacy)
+- [ ] Performance optimization (batch processing, caching)
+- [ ] Deployment packaging (Docker, installers)
 
 ---
 

@@ -47,26 +47,40 @@ def detect_column_positions(
 
 def calculate_thresholds(
     column_positions: Dict[str, int],
-    column_pairs: List[tuple]
+    column_pairs: List[tuple],
+    use_right_aligned: bool = False
 ) -> Dict[str, int]:
     """
-    Calculate midpoint thresholds between column pairs.
+    Calculate thresholds between column pairs.
 
-    Thresholds are used to classify amounts based on their position:
-    if position <= threshold, amount belongs to the left column.
+    Thresholds are used to classify amounts based on their position.
+
+    For right-aligned amounts (use_right_aligned=True):
+        Threshold is right_column.start() - 1
+        Amounts ending before the threshold belong to the left column.
+        Example: If "Money In" starts at 85, amounts ending at <=84 are "Money Out"
+
+    For left-aligned amounts (use_right_aligned=False, default):
+        Threshold is midpoint between columns
+        Amounts starting before threshold belong to the left column.
 
     Args:
         column_positions: Dictionary of column names to start positions
         column_pairs: List of (left_column, right_column) tuples
+        use_right_aligned: If True, use right_column_start - 1; if False, use midpoint
 
     Returns:
         Dictionary mapping threshold names to threshold values
 
-    Example:
+    Example (midpoint):
         >>> positions = {'Money out': 65, 'Money in': 85, 'Balance': 105}
         >>> pairs = [('Money out', 'Money in'), ('Money in', 'Balance')]
         >>> calculate_thresholds(positions, pairs)
         {'money_out_threshold': 75, 'money_in_threshold': 95}
+
+    Example (right-aligned):
+        >>> calculate_thresholds(positions, pairs, use_right_aligned=True)
+        {'money_out_threshold': 84, 'money_in_threshold': 104}
     """
     thresholds = {}
 
@@ -78,8 +92,13 @@ def calculate_thresholds(
         left_pos = column_positions[left_col]
         right_pos = column_positions[right_col]
 
-        # Calculate midpoint
-        threshold = (left_pos + right_pos) // 2
+        # Calculate threshold based on alignment strategy
+        if use_right_aligned:
+            # For right-aligned amounts, threshold is just before the next column starts
+            threshold = right_pos - 1
+        else:
+            # For left-aligned amounts, threshold is the midpoint
+            threshold = (left_pos + right_pos) // 2
 
         # Create threshold name from left column
         threshold_name = f"{left_col.lower().replace(' ', '_')}_threshold"
@@ -92,7 +111,8 @@ def find_and_update_thresholds(
     line: str,
     column_names: List[str],
     column_pairs: List[tuple],
-    current_thresholds: Optional[Dict[str, int]] = None
+    current_thresholds: Optional[Dict[str, int]] = None,
+    use_right_aligned: bool = False
 ) -> Optional[Dict[str, int]]:
     """
     All-in-one function: detect columns and calculate thresholds.
@@ -104,6 +124,7 @@ def find_and_update_thresholds(
         column_names: List of column names to search for
         column_pairs: List of (left_column, right_column) tuples for thresholds
         current_thresholds: Current threshold values (for logging comparison)
+        use_right_aligned: If True, use right-aligned threshold calculation
 
     Returns:
         Updated thresholds dict, or None if header not found
@@ -121,7 +142,7 @@ def find_and_update_thresholds(
     if not positions:
         return None
 
-    new_thresholds = calculate_thresholds(positions, column_pairs)
+    new_thresholds = calculate_thresholds(positions, column_pairs, use_right_aligned)
 
     # Log if thresholds changed
     if current_thresholds and new_thresholds != current_thresholds:
@@ -134,7 +155,8 @@ def pre_scan_for_thresholds(
     lines: List[str],
     column_names: List[str],
     column_pairs: List[tuple],
-    default_thresholds: Dict[str, int]
+    default_thresholds: Dict[str, int],
+    use_right_aligned: bool = False
 ) -> Dict[str, int]:
     """
     Pre-scan document to find first header and set initial thresholds.
@@ -147,6 +169,7 @@ def pre_scan_for_thresholds(
         column_names: List of column names to search for
         column_pairs: List of (left_column, right_column) tuples
         default_thresholds: Fallback thresholds if no header found
+        use_right_aligned: If True, use right-aligned threshold calculation
 
     Returns:
         Detected thresholds, or default_thresholds if no header found
@@ -162,7 +185,8 @@ def pre_scan_for_thresholds(
         {'money_out_threshold': 75, 'money_in_threshold': 95}
     """
     for line in lines:
-        thresholds = find_and_update_thresholds(line, column_names, column_pairs)
+        thresholds = find_and_update_thresholds(line, column_names, column_pairs,
+                                                use_right_aligned=use_right_aligned)
         if thresholds:
             logger.info(f"Pre-scan: Found header, set thresholds: {thresholds}")
             return thresholds

@@ -463,7 +463,8 @@ class BaseTransactionParser(ABC):
         lines: List[str],
         column_names: List[str],
         column_pairs: List[tuple],
-        default_thresholds: dict
+        default_thresholds: dict,
+        use_right_aligned: bool = False
     ) -> dict:
         """
         Pre-scan document to detect column positions and set thresholds.
@@ -476,6 +477,7 @@ class BaseTransactionParser(ABC):
             column_names: List of column names to search for (e.g., ["Money out", "Money in", "Balance"])
             column_pairs: List of (left_col, right_col) tuples for threshold calculation
             default_thresholds: Fallback thresholds if no header found
+            use_right_aligned: If True, use right-aligned threshold calculation (right_col.start() - 1)
 
         Returns:
             Dictionary of threshold names to positions
@@ -485,16 +487,19 @@ class BaseTransactionParser(ABC):
             ...     lines,
             ...     ["Money out", "Money in", "Balance"],
             ...     [("Money out", "Money in"), ("Money in", "Balance")],
-            ...     {'money_out_threshold': 75, 'money_in_threshold': 95}
+            ...     {'money_out_threshold': 75, 'money_in_threshold': 95},
+            ...     use_right_aligned=True
             ... )
         """
-        return pre_scan_for_thresholds(lines, column_names, column_pairs, default_thresholds)
+        return pre_scan_for_thresholds(lines, column_names, column_pairs, default_thresholds,
+                                       use_right_aligned=use_right_aligned)
 
     def _update_column_thresholds_from_header(
         self,
         line: str,
         column_names: List[str],
-        column_pairs: List[tuple]
+        column_pairs: List[tuple],
+        use_right_aligned: bool = False
     ) -> Optional[dict]:
         """
         Update column thresholds from a header line encountered during parsing.
@@ -506,6 +511,7 @@ class BaseTransactionParser(ABC):
             line: The line to check for header
             column_names: List of column names to search for
             column_pairs: List of (left_col, right_col) tuples
+            use_right_aligned: If True, use right-aligned threshold calculation
 
         Returns:
             Updated thresholds dict if header found, None otherwise
@@ -514,13 +520,15 @@ class BaseTransactionParser(ABC):
             >>> thresholds = self._update_column_thresholds_from_header(
             ...     line,
             ...     ["Money out", "Money in", "Balance"],
-            ...     [("Money out", "Money in"), ("Money in", "Balance")]
+            ...     [("Money out", "Money in"), ("Money in", "Balance")],
+            ...     use_right_aligned=True
             ... )
             >>> if thresholds:
             ...     MONEY_OUT_THRESHOLD = thresholds['money_out_threshold']
             ...     MONEY_IN_THRESHOLD = thresholds['money_in_threshold']
         """
-        return find_and_update_thresholds(line, column_names, column_pairs)
+        return find_and_update_thresholds(line, column_names, column_pairs,
+                                         use_right_aligned=use_right_aligned)
 
     def _validate_and_correct_balance(
         self,

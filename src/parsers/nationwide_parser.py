@@ -63,29 +63,21 @@ class NationwideParser(BaseTransactionParser):
         # Pattern to match amounts
         amount_pattern = re.compile(r'([\d,]+\.\d{2})')
 
-        # Column thresholds will be detected from header (if found)
-        # Default thresholds as fallback (based on older Nationwide format)
-        MONEY_OUT_THRESHOLD = 104
-        MONEY_IN_THRESHOLD = 123
+        # Detect column thresholds from header (Nationwide uses right-aligned amounts)
+        # For right-aligned amounts, threshold is right_column.start() - 1
+        # Amounts ending before the threshold belong to the left column
+        thresholds = self._detect_column_thresholds(
+            lines,
+            column_names=["£ Out", "£ In", "£ Balance"],
+            column_pairs=[("£ Out", "£ In"), ("£ In", "£ Balance")],
+            default_thresholds={'£_out_threshold': 104, '£_in_threshold': 123},
+            use_right_aligned=True
+        )
 
-        # Try to detect column positions from header
-        if header_line_idx is not None:
-            header_line = lines[header_line_idx]
-            money_out_match = re.search(r'£\s*Out', header_line, re.IGNORECASE)
-            money_in_match = re.search(r'£\s*In', header_line, re.IGNORECASE)
-            balance_match = re.search(r'£\s*Balance', header_line, re.IGNORECASE)
-
-            if money_out_match and money_in_match and balance_match:
-                # For right-aligned amounts, threshold is at the start of the next column
-                # Amounts ending before Money In column start are in Money Out
-                # Amounts ending before Balance column start are in Money In
-                MONEY_OUT_THRESHOLD = money_in_match.start() - 1
-                MONEY_IN_THRESHOLD = balance_match.start() - 1
-                logger.info(f"Detected Nationwide column thresholds from header: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
-            else:
-                logger.info(f"Using default Nationwide thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
-        else:
-            logger.info(f"No header found, using default thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
+        # Extract thresholds with more standard naming
+        MONEY_OUT_THRESHOLD = thresholds.get('£_out_threshold', 104)
+        MONEY_IN_THRESHOLD = thresholds.get('£_in_threshold', 123)
+        logger.info(f"Nationwide column thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
 
         # The info box on the right starts around position 150
         # We need to filter out amounts from the info box
@@ -103,57 +95,25 @@ class NationwideParser(BaseTransactionParser):
                 continue
 
             # Check for header on new page (update thresholds if found)
-            header_pattern_inline = re.compile(
-                r'Date\s+Description.*£\s*Out.*£\s*In.*£\s*Balance',
-                re.IGNORECASE
-            )
-            if header_pattern_inline.search(line):
-                money_out_match = re.search(r'£\s*Out', line, re.IGNORECASE)
-                money_in_match = re.search(r'£\s*In', line, re.IGNORECASE)
-                balance_match = re.search(r'£\s*Balance', line, re.IGNORECASE)
-
-                if money_out_match and money_in_match and balance_match:
-                    MONEY_OUT_THRESHOLD = money_in_match.start() - 1
-                    MONEY_IN_THRESHOLD = balance_match.start() - 1
+            # Header pattern: "Date Description ... £ Out ... £ In ... £ Balance"
+            if re.search(r'Date\s+Description.*£\s*Out.*£\s*In.*£\s*Balance', line, re.IGNORECASE):
+                updated = self._update_column_thresholds_from_header(
+                    line,
+                    column_names=["£ Out", "£ In", "£ Balance"],
+                    column_pairs=[("£ Out", "£ In"), ("£ In", "£ Balance")],
+                    use_right_aligned=True
+                )
+                if updated:
+                    MONEY_OUT_THRESHOLD = updated.get('£_out_threshold', MONEY_OUT_THRESHOLD)
+                    MONEY_IN_THRESHOLD = updated.get('£_in_threshold', MONEY_IN_THRESHOLD)
                     logger.debug(f"Updated Nationwide thresholds: Out<={MONEY_OUT_THRESHOLD}, In<={MONEY_IN_THRESHOLD}")
 
                 idx += 1
                 continue
 
-            # Skip footer lines, informational text, and page boundaries
-            skip_patterns = [
-                r'Nationwide Building Society',
-                r'Prudential Regulation',
-                r'Head Office',
-                r'Please check',
-                r'Interest, Rates and Fees',
-                r'Summary box',
-                r'Credit interest',
-                r'Arranged overdraft',
-                r'AER stands for',
-                r'Have you lost your card',
-                r'As an example',
-                r'For the.*example',
-                r'incurred up to',
-                r'withdrawal in a',
-                r'us as a sterling',
-                r'Non-Sterling Transaction',
-                r'Page \d+ of \d+',
-                r'Continued on next page',
-                r'Financial Conduct Authority',
-                r'Financial Services Compensation',
-                r'is higher as we charge interest',  # Info box text that was parsed as transaction
-                r'^\s*TOTALS\s*$',  # Summary totals line
-                r'Statement no:',
-                r'Statement date:',
-                r'Sort code',
-                r'Account no',
-                r'FlexAccount',
-                r'Your.*transactions',
-                r'Registered Office',
-                r'Balance from statement \d+',  # Already handled separately
-            ]
-            if any(re.search(pattern, line, re.IGNORECASE) for pattern in skip_patterns):
+            # Skip footers, headers, and other non-transaction lines
+            # Uses shared skip patterns plus Nationwide-specific ones from config
+            if self._is_skip_line(line):
                 idx += 1
                 continue
 

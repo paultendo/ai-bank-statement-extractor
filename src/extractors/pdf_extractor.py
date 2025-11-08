@@ -42,12 +42,15 @@ class PDFExtractor(BaseExtractor):
         """
         return file_path.suffix.lower() == '.pdf'
 
-    def extract(self, file_path: Path) -> tuple[str, float]:
+    def extract(self, file_path: Path, bbox: Optional[dict] = None) -> tuple[str, float]:
         """
         Extract text from PDF using pdfplumber.
 
         Args:
             file_path: Path to PDF file
+            bbox: Optional bounding box dict with keys: x0, top, x1, bottom
+                  Use this to crop pages and exclude unwanted regions (e.g., info boxes)
+                  Example: {"x0": 0, "top": 0, "x1": 450, "bottom": None}
 
         Returns:
             Tuple of (extracted_text, confidence_score)
@@ -61,7 +64,10 @@ class PDFExtractor(BaseExtractor):
             raise ExtractionError(f"File is not a PDF: {file_path}")
 
         try:
-            logger.info(f"Extracting text from PDF: {file_path}")
+            if bbox:
+                logger.info(f"Extracting text from PDF with bbox: {file_path} (bbox: {bbox})")
+            else:
+                logger.info(f"Extracting text from PDF: {file_path}")
 
             all_text = []
             total_pages = 0
@@ -72,7 +78,21 @@ class PDFExtractor(BaseExtractor):
                 logger.debug(f"PDF has {total_pages} pages")
 
                 for page_num, page in enumerate(pdf.pages, start=1):
-                    text = page.extract_text()
+                    # Apply bounding box if specified
+                    if bbox:
+                        # Build bbox tuple (x0, top, x1, bottom)
+                        # Use page dimensions for None values
+                        x0 = bbox.get('x0', 0)
+                        top = bbox.get('top', 0)
+                        x1 = bbox.get('x1') if bbox.get('x1') is not None else page.width
+                        bottom = bbox.get('bottom') if bbox.get('bottom') is not None else page.height
+
+                        bbox_tuple = (x0, top, x1, bottom)
+                        cropped_page = page.within_bbox(bbox_tuple)
+                        text = cropped_page.extract_text()
+                        logger.debug(f"Page {page_num}: Cropped to bbox {bbox_tuple}")
+                    else:
+                        text = page.extract_text()
 
                     if text and text.strip():
                         all_text.append(f"--- Page {page_num} ---\n{text}")

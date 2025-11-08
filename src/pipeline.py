@@ -89,6 +89,19 @@ class ExtractionPipeline:
                     processing_time=time.time() - start_time
                 )
 
+            # 2a.1. Re-extract with bbox if bank config specifies one
+            # This allows excluding info boxes or other unwanted regions
+            # Use pdfplumber with bbox for precise region extraction
+            pdf_bbox = bank_config._config.get('pdf_bbox')
+            if pdf_bbox and file_path.suffix.lower() == '.pdf':
+                logger.info(f"Bank config has pdf_bbox, re-extracting with pdfplumber cropping: {pdf_bbox}")
+                try:
+                    text, extraction_confidence = self.pdf_extractor.extract(file_path, bbox=pdf_bbox)
+                    extraction_method = "pdfplumber+bbox"
+                    logger.info(f"✓ Re-extracted with bbox cropping")
+                except Exception as e:
+                    logger.warning(f"Bbox re-extraction failed, using original text: {e}")
+
             # 2b. Extract statement metadata
             statement = self._extract_statement_metadata(text, bank_config)
             if not statement:
@@ -173,13 +186,38 @@ class ExtractionPipeline:
                     opening_date = brought_forward_txn.date
                     logger.info(f"Using BROUGHT FORWARD transaction for opening balance")
                 else:
-                    # Calculate from first transaction (backward from its balance)
+                    # Calculate from first transaction with a balance (backward from its balance)
                     first_txn = sorted_txns[0]
-                    calculated_opening = first_txn.balance - first_txn.money_in + first_txn.money_out
-                    opening_date = first_txn.date
 
-                # Use last transaction's balance as closing
-                calculated_closing = sorted_txns[-1].balance
+                    # Find first transaction with a balance
+                    txn_with_balance = None
+                    for txn in sorted_txns:
+                        if txn.balance is not None:
+                            txn_with_balance = txn
+                            break
+
+                    if txn_with_balance:
+                        calculated_opening = txn_with_balance.balance - txn_with_balance.money_in + txn_with_balance.money_out
+                        opening_date = txn_with_balance.date
+                        logger.debug(f"Calculated opening balance from transaction at {opening_date.date()}")
+                    else:
+                        # If no transactions have balances, use metadata or set to 0
+                        calculated_opening = statement.opening_balance if statement.opening_balance else 0.0
+                        opening_date = first_txn.date
+                        logger.warning("No transactions with balances found, using metadata or 0.0")
+
+                # Use last transaction's balance as closing (find last transaction with a balance)
+                txn_with_closing = None
+                for txn in reversed(sorted_txns):
+                    if txn.balance is not None:
+                        txn_with_closing = txn
+                        break
+
+                if txn_with_closing:
+                    calculated_closing = txn_with_closing.balance
+                else:
+                    calculated_closing = statement.closing_balance if statement.closing_balance else 0.0
+                    logger.warning("No transactions with closing balance found, using metadata or 0.0")
 
                 logger.info(f"Calculating statement balances from transactions:")
                 logger.info(f"  Opening: £0.00 → £{calculated_opening:.2f} (from {opening_date.date()})")
