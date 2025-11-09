@@ -79,6 +79,11 @@ class BankConfig:
         return self._config.get('pdfplumber_text_kwargs')
 
     @property
+    def capture_word_layout(self) -> bool:
+        """Whether to capture pdfplumber word coordinates for downstream parsers."""
+        return bool(self._config.get('capture_word_layout', False))
+
+    @property
     def pdf_bbox(self) -> Optional[dict]:
         """Static pdf bbox override."""
         return self._config.get('pdf_bbox')

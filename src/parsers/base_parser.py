@@ -271,6 +271,11 @@ class BaseTransactionParser(ABC):
         self.header_line_idx = None
         # Bank-specific parsers can stash supplemental data here (e.g., pot summaries)
         self.additional_data: dict = {}
+        self.word_layout: Optional[list] = None
+
+    def set_word_layout(self, word_layout: Optional[list]) -> None:
+        """Provide optional word-level layout data captured during extraction."""
+        self.word_layout = word_layout
 
     def _compile_pattern(self) -> Optional[re.Pattern]:
         """

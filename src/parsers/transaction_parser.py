@@ -117,6 +117,11 @@ class TransactionParser:
             statement_end_date
         )
 
+    def set_word_layout(self, word_layout: Optional[list]) -> None:
+        """Provide optional word layout data to the underlying parser."""
+        if hasattr(self._parser, 'set_word_layout'):
+            self._parser.set_word_layout(word_layout)
+
     def get_additional_data(self) -> dict:
         """Expose supplemental data gathered by bank-specific parser."""
         return getattr(self._parser, 'additional_data', {})

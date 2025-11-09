@@ -124,13 +124,12 @@
 - ✅ Extraction pipeline + CLI (`extract`, `banks`, `test`) wiring, including bbox support where configured
 - ✅ Logging/audit trail + analytics hooks
 - ✅ Streamlit UI prototype for manual review (ui/streamlit_app.py)
-- ✅ Regression-validated banks: NatWest (Statements 1-3), Halifax (Dec 24/Jan 25), HSBC (Myah Wright combined), Lloyds (Deborah Prime), Barclays (Proudfoot May 2024), Santander (CurrentAccountStatement_08022024), TSB (Savings account - Mark Wilcox), Monzo (monzo-bidmead, personal + pots)
-- ⚠️ Nationwide: Marsh Bankstatements up to April 2024 parses (695 txns) but balance reconciliation fails across bundled monthly statements.
+- ✅ Regression-validated banks: NatWest (Statements 1-3), Halifax (Dec 24/Jan 25), HSBC (Myah Wright combined), Lloyds (Deborah Prime), Barclays (Proudfoot May 2024), Santander (CurrentAccountStatement_08022024), TSB (Savings account - Mark Wilcox), Monzo (monzo-bidmead, personal + pots), Nationwide (Marsh combined statements Jan–Dec 2023; 623 txns with coordinate parser + period breaks)
 
 ### What Doesn't Work Yet:
 - ❌ Local OCR fallback (pytesseract) to bridge problematic digital PDFs like Halifax
 - ❌ Fully-implemented CLI batch processing
-- ❌ Automated regression suite covering bbox changes per bank
+- ❌ Automated regression suite covering bbox changes per bank (Nationwide next to add once smoke assertions are authored)
 - ❌ Broader validation of additional UK banks beyond NatWest sample set
 - ❌ Comprehensive tests for exporters/pipeline (unit + integration)
 

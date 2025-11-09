@@ -153,6 +153,11 @@ We recently completed a major refactoring of the parser architecture to improve 
 - Measure total LOC reduction across all parsers
 - Add bbox support to other banks with problematic layouts
 
+### Nationwide Layout Parser (November 2025)
+- Added a coordinate-aware Nationwide parser that consumes pdfplumber word layout, reconstructs table rows by `x` buckets, and injects `NATIONWIDE_PERIOD_BREAK` markers for every “Balance from statement …” line.
+- Dynamic amount-based bbox + tighter `x/y` tolerances keep the right-hand info panel out while preserving Money In/Balance columns.
+- Marsh Combined Statements (Jan–Dec 2023) now reconcile: 623 transactions, 13 period breaks, balance validation ✅, smoke-ready JSON at `output/nationwide_marsh.json`.
+
 ---
 
 ## Supported Banks (UK)

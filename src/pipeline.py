@@ -73,7 +73,7 @@ class ExtractionPipeline:
         try:
             # Phase 1: EXTRACT
             logger.info("Phase 1: EXTRACT")
-            text, extraction_confidence, extraction_method = self._extract_text(file_path)
+            text, extraction_confidence, extraction_method, word_layout = self._extract_text(file_path)
 
             if not text:
                 return self._create_error_result(
@@ -96,8 +96,9 @@ class ExtractionPipeline:
             pdf_bbox = self._resolve_pdf_bbox(file_path, bank_config)
             pdfplumber_laparams = bank_config.pdfplumber_laparams
             pdfplumber_text_kwargs = bank_config.pdfplumber_text_kwargs
+            capture_word_layout = bank_config.capture_word_layout
 
-            needs_pdfplumber = any([pdf_bbox, pdfplumber_laparams, pdfplumber_text_kwargs])
+            needs_pdfplumber = any([pdf_bbox, pdfplumber_laparams, pdfplumber_text_kwargs, capture_word_layout])
 
             if needs_pdfplumber and file_path.suffix.lower() == '.pdf':
                 if pdf_bbox:
@@ -107,11 +108,12 @@ class ExtractionPipeline:
                 if pdfplumber_text_kwargs:
                     logger.info(f"Bank config specifies pdfplumber text extraction kwargs: {pdfplumber_text_kwargs}")
                 try:
-                    text, extraction_confidence = self.pdf_extractor.extract(
+                    text, extraction_confidence, layout = self.pdf_extractor.extract(
                         file_path,
                         bbox=pdf_bbox,
                         laparams=pdfplumber_laparams,
-                        text_kwargs=pdfplumber_text_kwargs
+                        text_kwargs=pdfplumber_text_kwargs,
+                        capture_words=capture_word_layout
                     )
                     method_parts = ["pdfplumber"]
                     if pdf_bbox:
@@ -120,6 +122,10 @@ class ExtractionPipeline:
                         method_parts.append("laparams")
                     if pdfplumber_text_kwargs:
                         method_parts.append("text")
+                    if capture_word_layout:
+                        method_parts.append("words")
+                    if capture_word_layout and layout:
+                        word_layout = layout
                     extraction_method = "+".join(method_parts)
                     logger.info(f"✓ Re-extracted with pdfplumber ({' + '.join(method_parts[1:]) if len(method_parts) > 1 else 'default settings'})")
                 except Exception as e:
@@ -134,7 +140,7 @@ class ExtractionPipeline:
                 )
 
             # 2c. Parse transactions
-            transactions = self._parse_transactions(text, bank_config, statement, file_path)
+            transactions = self._parse_transactions(text, bank_config, statement, file_path, word_layout)
             if not transactions:
                 return self._create_error_result(
                     "No transactions found in statement",
@@ -323,7 +329,7 @@ class ExtractionPipeline:
                 processing_time=time.time() - start_time
             )
 
-    def _extract_text(self, file_path: Path) -> tuple[str, float, str]:
+    def _extract_text(self, file_path: Path) -> tuple[str, float, str, Optional[list]]:
         """
         Extract text from file using cascading strategies.
 
@@ -337,7 +343,7 @@ class ExtractionPipeline:
             file_path: Path to statement file
 
         Returns:
-            Tuple of (text, confidence, method_name)
+            Tuple of (text, confidence, method_name, word_layout)
         """
         logger.info(f"Extracting text from: {file_path.name}")
 
@@ -348,7 +354,7 @@ class ExtractionPipeline:
                 text, confidence = self.pdftotext_extractor.extract(file_path)
                 if text:
                     logger.info(f"✓ pdftotext extraction successful")
-                    return text, confidence, "pdftotext"
+                    return text, confidence, "pdftotext", None
             except RuntimeError as e:
                 # pdftotext not installed
                 logger.warning(f"pdftotext not available: {e}")
@@ -357,10 +363,10 @@ class ExtractionPipeline:
 
             # Fallback to pdfplumber
             try:
-                text, confidence = self.pdf_extractor.extract(file_path)
+                text, confidence, layout = self.pdf_extractor.extract(file_path)
                 if text:
                     logger.info(f"✓ pdfplumber extraction successful (fallback)")
-                    return text, confidence, "pdfplumber"
+                    return text, confidence, "pdfplumber", layout
             except Exception as e:
                 logger.warning(f"pdfplumber extraction failed: {e}")
 
@@ -373,7 +379,7 @@ class ExtractionPipeline:
             text, confidence = vision_extractor.extract(file_path)
             if text:
                 logger.info(f"✓ Vision API extraction successful")
-                return text, confidence, "vision_api"
+                return text, confidence, "vision_api", None
         except ImportError as e:
             logger.warning(f"Vision API extractor not available: {e}")
         except ValueError as e:
@@ -383,7 +389,7 @@ class ExtractionPipeline:
 
         # TODO: Try OCR (Tesseract) for medium quality scans (cheaper than Vision API)
 
-        return "", 0.0, "none"
+        return "", 0.0, "none", None
 
     def _resolve_pdf_bbox(self, file_path: Path, bank_config: BankConfig) -> Optional[dict]:
         """
@@ -762,7 +768,8 @@ class ExtractionPipeline:
         text: str,
         bank_config: BankConfig,
         statement: Statement,
-        file_path: Path
+        file_path: Path,
+        word_layout: Optional[list]
     ) -> list:
         """
         Parse transactions from text.
@@ -790,6 +797,8 @@ class ExtractionPipeline:
             LloydsParser._pdf_path = file_path
 
         parser = TransactionParser(bank_config)
+        if word_layout:
+            parser.set_word_layout(word_layout)
         transactions = parser.parse_text(
             text,
             statement_start_date=statement.statement_start_date,

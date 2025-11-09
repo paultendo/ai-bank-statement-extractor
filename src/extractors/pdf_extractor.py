@@ -47,8 +47,9 @@ class PDFExtractor(BaseExtractor):
         file_path: Path,
         bbox: Optional[dict] = None,
         laparams: Optional[dict] = None,
-        text_kwargs: Optional[dict] = None
-    ) -> tuple[str, float]:
+        text_kwargs: Optional[dict] = None,
+        capture_words: bool = False
+    ) -> tuple[str, float, Optional[list]]:
         """
         Extract text from PDF using pdfplumber.
 
@@ -59,7 +60,7 @@ class PDFExtractor(BaseExtractor):
                   Example: {"x0": 0, "top": 0, "x1": 450, "bottom": None}
 
         Returns:
-            Tuple of (extracted_text, confidence_score)
+            Tuple of (extracted_text, confidence_score, word_layout)
 
         Raises:
             ExtractionError: If extraction fails
@@ -85,6 +86,7 @@ class PDFExtractor(BaseExtractor):
             all_text = []
             total_pages = 0
             pages_with_text = 0
+            word_layout = [] if capture_words else None
 
             open_kwargs = {}
             if laparams:
@@ -108,8 +110,10 @@ class PDFExtractor(BaseExtractor):
                         cropped_page = page.within_bbox(bbox_tuple)
                         text = cropped_page.extract_text(**text_kwargs)
                         logger.debug(f"Page {page_num}: Cropped to bbox {bbox_tuple}")
+                        words_source = cropped_page
                     else:
                         text = page.extract_text(**text_kwargs)
+                        words_source = page
 
                     if text and text.strip():
                         all_text.append(f"--- Page {page_num} ---\n{text}")
@@ -118,12 +122,29 @@ class PDFExtractor(BaseExtractor):
                     else:
                         logger.warning(f"No text found on page {page_num}")
 
+                    if capture_words and word_layout is not None:
+                        try:
+                            word_kwargs = {
+                                'x_tolerance': text_kwargs.get('x_tolerance', 1.0)
+                            }
+                            if 'y_tolerance' in text_kwargs:
+                                word_kwargs['y_tolerance'] = text_kwargs['y_tolerance']
+                            page_words = words_source.extract_words(use_text_flow=True, **word_kwargs)
+                            word_layout.append({
+                                'page_number': page_num,
+                                'width': words_source.width,
+                                'height': words_source.height,
+                                'words': page_words
+                            })
+                        except Exception as word_exc:  # noqa: BLE001
+                            logger.debug(f"Failed to capture word layout on page {page_num}: {word_exc}")
+
             extracted_text = "\n\n".join(all_text)
 
             # Calculate confidence based on text extraction success
             if not extracted_text.strip():
                 logger.warning("No text extracted from PDF - likely scanned")
-                return "", 0.0
+                return "", 0.0, word_layout if capture_words else None
 
             # Confidence is based on percentage of pages with text
             confidence = (pages_with_text / total_pages) * 100.0
@@ -134,7 +155,7 @@ class PDFExtractor(BaseExtractor):
                 f"(confidence: {confidence:.1f}%)"
             )
 
-            return extracted_text, confidence
+            return extracted_text, confidence, word_layout if capture_words else None
 
         except Exception as e:
             logger.error(f"Failed to extract text from PDF: {e}")

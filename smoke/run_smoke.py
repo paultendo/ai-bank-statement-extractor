@@ -100,6 +100,49 @@ def check_monzo_pots(xlsx_path: Path) -> None:
         raise AssertionError("Monzo Pot Summaries sheet is empty")
 
 
+def check_nationwide_periods(xlsx_path: Path) -> None:
+    json_path = xlsx_path.with_suffix(".json")
+    result = load_result_json(json_path)
+    txns = result.get("transactions") or []
+
+    period_break_indices = [
+        idx for idx, txn in enumerate(txns)
+        if txn.get("description") == "NATIONWIDE_PERIOD_BREAK"
+    ]
+    expected_breaks = 13
+    if len(period_break_indices) != expected_breaks:
+        raise AssertionError(
+            f"Nationwide expected {expected_breaks} period breaks, found {len(period_break_indices)}"
+        )
+
+    running_balance = None
+    periods_checked = 0
+    for txn in txns:
+        if txn.get("description") == "NATIONWIDE_PERIOD_BREAK":
+            running_balance = txn.get("balance")
+            periods_checked += 1
+            continue
+
+        if running_balance is None:
+            raise AssertionError("Nationwide transactions appeared before first period break marker")
+
+        running_balance += txn.get("money_in", 0.0) - txn.get("money_out", 0.0)
+        stated_balance = txn.get("balance")
+        if stated_balance is None:
+            continue
+        if abs(running_balance - stated_balance) > 0.02:
+            raise AssertionError(
+                "Nationwide balance drift detected: "
+                f"calc £{running_balance:.2f} vs stated £{stated_balance:.2f} "
+                f"on {txn.get('date')} / {txn.get('description')}"
+            )
+
+    if periods_checked != expected_breaks:
+        raise AssertionError(
+            f"Nationwide period markers processed ({periods_checked}) mismatch expected {expected_breaks}"
+        )
+
+
 def make_case(filename: str, extra: list[Callable[[Path], None]] | None = None) -> SmokeCase:
     statement_path = STATEMENTS / filename
     output_path = OUTPUT / (statement_path.stem + "_smoke.xlsx")
@@ -130,6 +173,10 @@ CASES = [
     make_case(
         "monzo-bidmead.pdf",
         extra=[check_monzo_pots],
+    ),
+    make_case(
+        "Marsh Bankstatements up to April 2024.pdf",
+        extra=[check_nationwide_periods],
     ),
 ]
 

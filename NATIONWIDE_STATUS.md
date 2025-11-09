@@ -1,28 +1,31 @@
 # Nationwide Support Status
 
-## Current Status: ⚠️ Partial (multi-statement PDF parses but balance check fails)
+## Current Status: ✅ Validated (multi-period PDF reconciles with layout parser)
 
 ### Regression Run (Marsh Bankstatements up to April 2024)
 ```
 python3 -m src.cli extract "statements/Marsh Bankstatements up to April 2024.pdf" \
+  --bank nationwide \
   --output output/nationwide_marsh.xlsx \
   --json output/nationwide_marsh.json
 ```
 
-- Detected bank: **Nationwide** (FlexAccount, combined statements 132–144).
-- Extraction path: `pdftotext` with Nationwide bbox crop (x1=450) to strip the right-hand info box.
-- Transactions parsed: **695** covering **1 Jan 2023 – 30 Dec 2023** (Money In £5,116.74, Money Out £5,359.83).
-- Statement metadata defaults to the first statement date (23 March 2023) and is refined from transaction dates.
-- Excel export + JSON snapshot written to `output/nationwide_marsh.*`.
-- **Balance validation fails** (opening £8.69, closing £144.03) because the PDF bundles 12 monthly statements without clear period breaks—we currently treat it as a single statement, so balances jump when each new “Balance from statement …” line appears.
+- Detected bank: **Nationwide** (FlexAccount, combined statements 132–144 spanning Jan–Dec 2023 + Q1 2024 headers).
+- Extraction path: `pdftotext` ➝ `pdfplumber+bbox+text+words` with dynamic amount-bound x₁ and tightened `x_tolerance=1.0 / y_tolerance=1.2`.
+- Transactions parsed: **623** (Money In £6,079.44, Money Out £6,136.32) with **13** `NATIONWIDE_PERIOD_BREAK` markers (one per statement-period start).
+- Statement metadata refined to **2023-01-01 – 2023-12-30**; Excel + JSON snapshots written to `output/nationwide_marsh.*`.
+- **Balance validation:** ✅ passes end-to-end; running balances reset at each period break and align with statement totals.
 
-### Observations
-- Nationwide PDFs omit spaces between digits and month names (e.g., `24Feb`). The parser now normalizes these before date matching.
-- Header metadata is sparse; we introduced a more forgiving `statement_date` regex and whitespace normalizer to capture strings like `Statementdate: 23March 2023`.
-- We record every “Balance from statement …” line but simply skip it; to reconcile multi-statement PDFs we should insert period-break markers (similar to the Monzo implementation) whenever we hit these lines.
-- Pages past December 2023 still exist (statements 143/144), but they’re dominated by info-box summaries; actual 2024 transaction lines are interleaved with `Statementdate …` text, so we need to confirm whether bbox cropping is trimming any of them.
+### Parser/Extractor Changes
+- Added **coordinate-aware layout parser**: we now capture pdfplumber word geometry, bucket columns via header-derived x-positions, and rebuild rows directly from coordinates (no pdftotext heuristics).
+- Introduced `capture_word_layout: true` + dynamic bbox strategy (`dynamic_amount_x1`) in `nationwide.yaml`, plus configurable `x_tolerance`/`y_tolerance` forwarding so `extract_words()` stays in sync with text extraction.
+- `_parse_with_layout` now:
+  - Filters info-box text via x-cutoff (Balance column + 20 pt) instead of keyword-only skips.
+  - Detects `Balance from statement …` rows, injects `NATIONWIDE_PERIOD_BREAK` transactions, and resets running balances per block.
+  - Reconstructs descriptions from bounded x ranges and appends merchant continuation lines automatically.
+- Text-only fallback (`_parse_from_lines`) is still available but unused in the happy path.
 
 ### Next Steps
-1. Teach the Nationwide parser to detect `Balance from statement <n>` and insert synthetic `PERIOD_BREAK` markers so each monthly statement reconciles independently.
-2. Verify whether the current bbox (x1=450) drops any 2024 transaction rows; adjust if necessary.
-3. Once reconciliation passes, add this PDF to the smoke suite with per-period assertions.
+1. **Smoke harness** – add `statements/Marsh Bankstatements up to April 2024.pdf` to `smoke/run_smoke.py` with custom assertions (13 period breaks, per-period reconciliation).
+2. **Documentation refresh** – mirror the new parser details in `docs/PROJECT_GUIDE.md` / README "Recent Updates" so other agents know the layout parser is required.
+3. **Future-proofing** – consider surfacing layout diagnostics (max column x, num rows/page) in logs to catch future bbox regressions automatically.
