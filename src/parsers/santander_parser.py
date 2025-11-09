@@ -16,7 +16,7 @@ Format characteristics:
 import logging
 import re
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from .base_parser import BaseTransactionParser
 from ..models import Transaction, TransactionType
@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 class SantanderParser(BaseTransactionParser):
     """Parser for Santander bank statements."""
+
+    BALANCE_DELTA_TOLERANCE = 0.02
 
     def parse_transactions(
         self,
@@ -111,20 +113,27 @@ class SantanderParser(BaseTransactionParser):
                 if prefix_char == ',' or (amt_pos < len(line) and line[amt_pos] == ','):
                     continue
 
+                if not self._is_valid_amount_token(amt_str):
+                    continue
+
                 amounts.append((amt_pos, amt_str))
 
             if not amounts:
                 return None, None, None
 
+            amounts = self._dedupe_shadow_amounts(amounts)
+
             # Santander format: balance is ALWAYS the rightmost (last) amount
-            balance_str = amounts[-1][1]
+            balance_pos, balance_str = amounts[-1]
             balance = parse_currency(balance_str)
 
-            if len(amounts) == 1:
+            count = len(amounts)
+
+            if count == 1:
                 # Only balance (e.g., "Balance brought forward")
                 return None, None, balance
 
-            elif len(amounts) == 2:
+            elif count == 2:
                 # One transaction amount + balance
                 txn_amt_pos, txn_amt_str = amounts[0]
                 txn_amt = parse_currency(txn_amt_str)
@@ -139,7 +148,7 @@ class SantanderParser(BaseTransactionParser):
                     # Money out column
                     return None, txn_amt, balance
 
-            elif len(amounts) == 3:
+            elif count == 3:
                 # Both money_in and money_out + balance
                 # This is rare but can happen
                 money_in = parse_currency(amounts[0][1])
@@ -253,18 +262,23 @@ class SantanderParser(BaseTransactionParser):
                     logger.debug(f"Skipping 'Balance brought forward' marker at {current_date}")
                     continue
 
+                prev_balance = transactions[-1].balance if transactions else None
+                money_in, money_out = self._apply_balance_delta(money_in, money_out, balance, prev_balance)
+
                 # Check if this is a complete transaction (has balance)
                 if balance is not None:
                     # Complete transaction on one line
+                    txn_money_in = money_in if money_in is not None else 0.0
+                    txn_money_out = money_out if money_out is not None else 0.0
                     transaction = Transaction(
                         date=current_date,
                         description=description,
-                        money_in=money_in or 0.0,
-                        money_out=money_out or 0.0,
+                        money_in=txn_money_in,
+                        money_out=txn_money_out,
                         balance=balance,
                         transaction_type=self._detect_transaction_type(description),
                         confidence=self._calculate_confidence(
-                            current_date, description, money_in or 0.0, money_out or 0.0, balance
+                            current_date, description, txn_money_in, txn_money_out, balance
                         )
                     )
                     transactions.append(transaction)
@@ -283,6 +297,9 @@ class SantanderParser(BaseTransactionParser):
                     # This is a continuation of the previous transaction
                     money_in, money_out, balance = extract_amounts_from_line(line)
 
+                    prev_balance = transactions[-1].balance if transactions else None
+                    money_in, money_out = self._apply_balance_delta(money_in, money_out, balance, prev_balance)
+
                     if balance is not None:
                         # Found amounts - complete the transaction
                         full_description = ' '.join(current_description + [line.strip()])
@@ -292,15 +309,17 @@ class SantanderParser(BaseTransactionParser):
                             full_description = full_description.replace(amt_match.group(0), '', 1)
                         full_description = full_description.strip()
 
+                        txn_money_in = money_in if money_in is not None else 0.0
+                        txn_money_out = money_out if money_out is not None else 0.0
                         transaction = Transaction(
                             date=current_date,
                             description=full_description,
-                            money_in=money_in or 0.0,
-                            money_out=money_out or 0.0,
+                            money_in=txn_money_in,
+                            money_out=txn_money_out,
                             balance=balance,
                             transaction_type=self._detect_transaction_type(full_description),
                             confidence=self._calculate_confidence(
-                                current_date, full_description, money_in or 0.0, money_out or 0.0, balance
+                                current_date, full_description, txn_money_in, txn_money_out, balance
                             )
                         )
                         transactions.append(transaction)
@@ -314,3 +333,78 @@ class SantanderParser(BaseTransactionParser):
 
         logger.info(f"Parsed {len(transactions)} transactions from Santander statement")
         return transactions
+
+    @staticmethod
+    def _is_valid_amount_token(token: str) -> bool:
+        """
+        Validate amount tokens so we ignore malformed values like '342,30.00'.
+
+        Accept either plain decimals (123.45) or comma-grouped thousands where
+        every comma is followed by exactly three digits (e.g., 1,234.56).
+        """
+        if not token:
+            return False
+
+        if ',' not in token:
+            return True
+
+        import re
+        return bool(re.fullmatch(r'-?\d{1,3}(?:,\d{3})+\.\d{2}', token))
+
+    @staticmethod
+    def _dedupe_shadow_amounts(amounts: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
+        """
+        Some PDFs repeat the transaction amount with extra leading digits
+        (e.g., '398,200.00 200.00 35.09'). Drop the shadow token whose suffix
+        exactly matches the following amount.
+        """
+        cleaned = []
+        i = 0
+        total = len(amounts)
+
+        def normalize(value: str) -> str:
+            return value.replace(',', '')
+
+        while i < total:
+            amt_pos, amt_str = amounts[i]
+            if ',' in amt_str and i + 1 < total:
+                suffix = amt_str.split(',')[-1]
+                next_str = amounts[i + 1][1]
+                if normalize(suffix) == normalize(next_str):
+                    i += 1
+                    continue
+            cleaned.append((amt_pos, amt_str))
+            i += 1
+
+        return cleaned or amounts
+
+    @classmethod
+    def _apply_balance_delta(
+        cls,
+        money_in: Optional[float],
+        money_out: Optional[float],
+        balance: Optional[float],
+        previous_balance: Optional[float]
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Infer missing money_in/out from the change in running balance."""
+        if balance is None or previous_balance is None:
+            return money_in, money_out
+
+        delta = balance - previous_balance
+        if abs(delta) <= cls.BALANCE_DELTA_TOLERANCE:
+            return money_in, money_out
+
+        current_delta = (money_in or 0.0) - (money_out or 0.0)
+        if abs(current_delta - delta) <= cls.BALANCE_DELTA_TOLERANCE:
+            return money_in, money_out
+
+        inferred_in = None
+        inferred_out = None
+        if delta > 0:
+            inferred_in = abs(delta)
+            inferred_out = 0.0
+        else:
+            inferred_in = 0.0
+            inferred_out = abs(delta)
+
+        return inferred_in, inferred_out
