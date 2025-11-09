@@ -659,12 +659,23 @@ class NatWestParser(BaseTransactionParser):
                 current_date = marker_date
                 continue
 
-            if not current_date:
-                continue
-
             description = self._normalize_spaces(' '.join(pending_desc))
             if not description:
                 description = self._normalize_spaces(desc_fragment or row_text)
+
+            if not current_date:
+                inferred_date = self._extract_inline_date(
+                    description,
+                    statement_start_date,
+                    statement_end_date
+                )
+                if inferred_date:
+                    current_date = inferred_date
+
+            if not current_date:
+                pending_desc = []
+                pending_type = []
+                continue
 
             type_hint = self._normalize_spaces(' '.join(pending_type))
 
@@ -1225,3 +1236,27 @@ class NatWestParser(BaseTransactionParser):
     @staticmethod
     def _normalize_spaces(text: Optional[str]) -> str:
         return re.sub(r'\s+', ' ', text or '').strip()
+
+    def _extract_inline_date(
+        self,
+        text: str,
+        statement_start_date: Optional[datetime],
+        statement_end_date: Optional[datetime]
+    ) -> Optional[datetime]:
+        if not text:
+            return None
+        inline_match = re.search(r'(\d{1,2}\s+[A-Z]{3}\s*\d{0,4}|\d{1,2}[A-Z]{3}\d{2,4})', text, re.IGNORECASE)
+        if not inline_match:
+            return None
+        token = inline_match.group(0)
+        token = self._normalize_date_token(token)
+        if statement_start_date and statement_end_date:
+            try:
+                return infer_year_from_period(
+                    token,
+                    statement_start_date,
+                    statement_end_date
+                )
+            except Exception:
+                return parse_date(token, self.config.date_formats)
+        return parse_date(token, self.config.date_formats)
