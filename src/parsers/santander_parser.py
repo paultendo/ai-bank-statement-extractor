@@ -61,7 +61,7 @@ class SantanderParser(BaseTransactionParser):
         date_pattern = re.compile(r'^(\d{1,2}(?:st|nd|rd|th)?\s+\w+)\s+')
 
         # Pattern for amounts (money format)
-        amount_pattern = re.compile(r'([\d,]+\.\d{2})')
+        amount_pattern = re.compile(r'(-?[\d,]+\.\d{2})')
 
         # Pattern for table header (to find start of transactions)
         header_pattern = re.compile(r'Date\s+Description.*Money\s+in.*Money\s+out.*Balance', re.IGNORECASE)
@@ -101,6 +101,16 @@ class SantanderParser(BaseTransactionParser):
             for match in amount_pattern.finditer(line):
                 amt_str = match.group(1)
                 amt_pos = match.start()
+
+                # Ignore inline FX annotations such as ",2.70 GBP, RATE 1.00/GBP"
+                # by skipping tokens immediately followed by "GBP" or "/GBP".
+                trailer = line[match.end():match.end() + 4]
+                prefix_char = line[amt_pos - 1] if amt_pos > 0 else ''
+                if 'GBP' in trailer.upper():
+                    continue
+                if prefix_char == ',' or (amt_pos < len(line) and line[amt_pos] == ','):
+                    continue
+
                 amounts.append((amt_pos, amt_str))
 
             if not amounts:
