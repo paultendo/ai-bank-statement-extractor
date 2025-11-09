@@ -454,3 +454,8 @@ For issues or questions:
 5. **Process first statement**: `python -m src.cli extract fixtures/sample.pdf`
 
 **Questions?** Check the documentation or raise an issue!
+
+### Batch Processing Status (November 2025)
+- `python3 -m src.cli batch <dir>` walks any folder of PDFs, auto-detects the bank per file, writes per-statement XLSX/JSON outputs, and emits a manifest (`batch_summary.json`) summarising success, warnings, reconciliation, etc.
+- The Streamlit app mirrors that capability: upload multiple files, click “Extract All,” and it runs the shared batch runner, surfaces per-file warnings, and offers consolidated exports (combined transactions Excel, CSVs, manifest JSON).
+- Both surfaces now support CSV output (CLI: `--format csv`, Streamlit: download buttons), so you can hand the consolidated data directly to GPT/Claude without Excel overhead.

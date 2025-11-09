@@ -93,6 +93,7 @@ class LloydsParser(BaseTransactionParser):
             List of transactions
         """
         transactions = []
+        previous_balance = None
 
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
@@ -173,6 +174,8 @@ class LloydsParser(BaseTransactionParser):
                             statement_end_date
                         )
                         if txn:
+                            txn = self._apply_balance_inference(txn, previous_balance)
+                            previous_balance = txn.balance if txn.balance is not None else previous_balance
                             transactions.append(txn)
                             logger.debug(f"Parsed transaction: {txn.date.date()} {txn.description[:30]}")
                     except Exception as e:
@@ -282,3 +285,20 @@ class LloydsParser(BaseTransactionParser):
             return TransactionType.FEE
         else:
             return TransactionType.OTHER
+
+    @staticmethod
+    def _apply_balance_inference(txn: Transaction, previous_balance: Optional[float]) -> Transaction:
+        """Flip Lloyds balances when the minus sign disappears in the PDF."""
+        if previous_balance is None or txn.balance is None:
+            return txn
+
+        expected = previous_balance + txn.money_in - txn.money_out
+        tolerance = 0.05
+
+        if abs(txn.balance - expected) <= tolerance:
+            return txn
+
+        flipped = -txn.balance
+        if abs(flipped - expected) <= tolerance:
+            txn.balance = flipped
+        return txn

@@ -93,6 +93,11 @@ class BankConfig:
         """Dynamic pdf bbox strategy configuration."""
         return self._config.get('pdf_bbox_strategy')
 
+    @property
+    def force_pdfplumber(self) -> bool:
+        """Whether to skip pdftotext and extract via pdfplumber first."""
+        return bool(self._config.get('force_pdfplumber', False))
+
     def get(self, key: str, default=None):
         """Get any config value by key."""
         return self._config.get(key, default)

@@ -288,6 +288,23 @@ class BalanceValidator:
         difference = abs(calculated_closing - statement.closing_balance)
 
         if difference > self.tolerance:
+            last_balance = next(
+                (txn.balance for txn in reversed(transactions) if txn.balance is not None),
+                None
+            )
+
+            if last_balance is not None and abs(calculated_closing - last_balance) <= self.tolerance:
+                logger.warning(
+                    "Statement metadata closing balance mismatch detected (metadata £%s vs ledger £%s) - using ledger value",
+                    f"{statement.closing_balance:.2f}",
+                    f"{last_balance:.2f}"
+                )
+                statement.closing_balance = last_balance
+                return ValidationResult(
+                    success=True,
+                    message="Statement metadata closing balance mismatch corrected from ledger"
+                )
+
             error_msg = (
                 f"Statement balance mismatch: "
                 f"Opening £{actual_opening:.2f} + "

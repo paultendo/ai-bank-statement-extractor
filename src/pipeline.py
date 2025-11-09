@@ -76,7 +76,22 @@ class ExtractionPipeline:
         try:
             # Phase 1: EXTRACT
             logger.info("Phase 1: EXTRACT")
-            text, extraction_confidence, extraction_method, word_layout = self._extract_text(file_path)
+            provided_bank_config = None
+            prefer_pdfplumber = False
+
+            if bank_name:
+                provided_bank_config = self.bank_config_loader.get_config(bank_name)
+                if not provided_bank_config:
+                    return self._create_error_result(
+                        f"Unsupported bank: {bank_name}",
+                        processing_time=time.time() - start_time
+                    )
+                prefer_pdfplumber = provided_bank_config.force_pdfplumber
+
+            text, extraction_confidence, extraction_method, word_layout = self._extract_text(
+                file_path,
+                prefer_pdfplumber=prefer_pdfplumber
+            )
 
             if not text:
                 return self._create_error_result(
@@ -88,7 +103,10 @@ class ExtractionPipeline:
             logger.info("Phase 2: TRANSFORM")
 
             # 2a. Detect bank
-            bank_config = self._detect_bank(text, bank_name)
+            if provided_bank_config:
+                bank_config = provided_bank_config
+            else:
+                bank_config = self._detect_bank(text, bank_name)
             if not bank_config:
                 return self._create_error_result(
                     f"Could not detect bank. Supported banks: {self.bank_config_loader.get_all_banks()}",
@@ -199,64 +217,55 @@ class ExtractionPipeline:
                 statement.statement_start_date = actual_start
                 statement.statement_end_date = actual_end
 
-            # 2c.3. Calculate balances from transactions if missing
-            # When statement has no balance metadata (both opening and closing are 0), calculate from transactions
-            if statement.opening_balance == 0.0 and statement.closing_balance == 0.0 and transactions:
+            # 2c.3. Calculate balances from transactions (trust ledger over metadata)
+            if transactions:
                 sorted_txns = sorted(transactions, key=lambda t: t.date)
+                tolerance = 0.01
 
-                # Check for BROUGHT FORWARD transaction (authoritative opening balance)
-                brought_forward_txn = None
-                for txn in sorted_txns:
-                    if "BROUGHT FORWARD" in txn.description.upper() or "START BALANCE" in txn.description.upper():
-                        brought_forward_txn = txn
-                        break
+                # Opening balance from BROUGHT FORWARD or first transaction
+                brought_forward_txn = next(
+                    (txn for txn in sorted_txns if 'BROUGHT FORWARD' in txn.description.upper() or 'START BALANCE' in txn.description.upper()),
+                    None
+                )
 
-                # Calculate opening balance
-                if brought_forward_txn:
-                    # Use BROUGHT FORWARD balance as the authoritative opening balance
+                if brought_forward_txn and brought_forward_txn.balance is not None:
                     calculated_opening = brought_forward_txn.balance
-                    opening_date = brought_forward_txn.date
-                    logger.info(f"Using BROUGHT FORWARD transaction for opening balance")
+                    logger.info("Using BROUGHT FORWARD transaction for opening balance")
                 else:
-                    # Calculate from first transaction with a balance (backward from its balance)
-                    first_txn = sorted_txns[0]
-
-                    # Find first transaction with a balance
-                    txn_with_balance = None
-                    for txn in sorted_txns:
-                        if txn.balance is not None:
-                            txn_with_balance = txn
-                            break
-
+                    txn_with_balance = next((txn for txn in sorted_txns if txn.balance is not None), None)
                     if txn_with_balance:
                         calculated_opening = txn_with_balance.balance - txn_with_balance.money_in + txn_with_balance.money_out
-                        opening_date = txn_with_balance.date
-                        logger.debug(f"Calculated opening balance from transaction at {opening_date.date()}")
+                        logger.debug(
+                            "Calculated opening balance from transaction on %s",
+                            txn_with_balance.date.date()
+                        )
                     else:
-                        # If no transactions have balances, use metadata or set to 0
-                        calculated_opening = statement.opening_balance if statement.opening_balance else 0.0
-                        opening_date = first_txn.date
-                        logger.warning("No transactions with balances found, using metadata or 0.0")
+                        calculated_opening = statement.opening_balance
+                        logger.warning("No transaction balances available to derive opening balance")
 
-                # Use last transaction's balance as closing (find last transaction with a balance)
-                txn_with_closing = None
-                for txn in reversed(sorted_txns):
-                    if txn.balance is not None:
-                        txn_with_closing = txn
-                        break
+                if calculated_opening is not None and abs((statement.opening_balance or 0.0) - calculated_opening) > tolerance:
+                    logger.info(
+                        "Adjusting opening balance metadata £%.2f → £%.2f",
+                        statement.opening_balance or 0.0,
+                        calculated_opening
+                    )
+                    statement.opening_balance = calculated_opening
 
+                # Closing balance from last transaction with a balance
+                txn_with_closing = next((txn for txn in reversed(sorted_txns) if txn.balance is not None), None)
                 if txn_with_closing:
                     calculated_closing = txn_with_closing.balance
                 else:
-                    calculated_closing = statement.closing_balance if statement.closing_balance else 0.0
-                    logger.warning("No transactions with closing balance found, using metadata or 0.0")
+                    calculated_closing = statement.closing_balance
+                    logger.warning("No transaction balances available to derive closing balance")
 
-                logger.info(f"Calculating statement balances from transactions:")
-                logger.info(f"  Opening: £0.00 → £{calculated_opening:.2f} (from {opening_date.date()})")
-                logger.info(f"  Closing: £0.00 → £{calculated_closing:.2f} (from {sorted_txns[-1].date.date()})")
-
-                statement.opening_balance = calculated_opening
-                statement.closing_balance = calculated_closing
+                if calculated_closing is not None and abs((statement.closing_balance or 0.0) - calculated_closing) > tolerance:
+                    logger.info(
+                        "Adjusting closing balance metadata £%.2f → £%.2f",
+                        statement.closing_balance or 0.0,
+                        calculated_closing
+                    )
+                    statement.closing_balance = calculated_closing
 
             # 2d. Validate balances
             balance_reconciled = False
@@ -339,46 +348,57 @@ class ExtractionPipeline:
                 processing_time=time.time() - start_time
             )
 
-    def _extract_text(self, file_path: Path) -> tuple[str, float, str, Optional[list]]:
+    def _extract_text(self, file_path: Path, prefer_pdfplumber: bool = False) -> tuple[str, float, str, Optional[list]]:
         """
         Extract text from file using cascading strategies.
 
-        Strategy order:
-        1. PDF text extraction with pdfplumber (fast, good for most PDFs)
-        2. PDF text extraction with pdftotext (fallback for problematic PDFs like Halifax)
-        3. OCR (medium speed/cost) - TODO
-        4. Vision API (slow, expensive) - TODO
-
         Args:
             file_path: Path to statement file
+            prefer_pdfplumber: If True, try pdfplumber before pdftotext
 
         Returns:
             Tuple of (text, confidence, method_name, word_layout)
         """
         logger.info(f"Extracting text from: {file_path.name}")
 
-        # Try PDF text extraction
-        if file_path.suffix.lower() == '.pdf':
-            # Try pdftotext first (better layout preservation with -layout flag)
-            try:
-                text, confidence = self.pdftotext_extractor.extract(file_path)
-                if text:
-                    logger.info(f"✓ pdftotext extraction successful")
-                    return text, confidence, "pdftotext", None
-            except RuntimeError as e:
-                # pdftotext not installed
-                logger.warning(f"pdftotext not available: {e}")
-            except Exception as e:
-                logger.warning(f"pdftotext extraction failed: {e}")
-
-            # Fallback to pdfplumber
+        def run_pdfplumber():
             try:
                 text, confidence, layout = self.pdf_extractor.extract(file_path)
                 if text:
-                    logger.info(f"✓ pdfplumber extraction successful (fallback)")
+                    logger.info("✓ pdfplumber extraction successful")
                     return text, confidence, "pdfplumber", layout
-            except Exception as e:
-                logger.warning(f"pdfplumber extraction failed: {e}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"pdfplumber extraction failed: {exc}")
+            return None
+
+        def run_pdftotext():
+            try:
+                text, confidence = self.pdftotext_extractor.extract(file_path)
+                if text:
+                    logger.info("✓ pdftotext extraction successful")
+                    return text, confidence, "pdftotext", None
+            except RuntimeError as exc:
+                logger.warning(f"pdftotext not available: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"pdftotext extraction failed: {exc}")
+            return None
+
+        # Try PDF text extraction
+        if file_path.suffix.lower() == '.pdf':
+            if prefer_pdfplumber:
+                result = run_pdfplumber()
+                if result:
+                    return result
+                result = run_pdftotext()
+                if result:
+                    return result
+            else:
+                result = run_pdftotext()
+                if result:
+                    return result
+                result = run_pdfplumber()
+                if result:
+                    return result
 
         # Try Vision API for scanned PDFs/images (last resort - expensive but robust)
         try:

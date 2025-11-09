@@ -44,6 +44,21 @@ natwest:
     - "%d %b %Y"      # "18 DEC 2024" or "27 Aug 2020"
     - "%d %b"         # "19 DEC" (year inferred from statement period)
     - "%d %B %Y"      # "18 December 2024" or "28 August 2020" (ordinal suffix removed in normalization)
+
+  # Layout-aware extraction settings
+  pdf_bbox_strategy:
+    type: "dynamic_amount_x1"
+    margin: 18
+    x0: 0
+    top: 0
+    bottom: null
+
+  pdfplumber_text_kwargs:
+    x_tolerance: 1.0
+    y_tolerance: 1.2
+
+  capture_word_layout: true
+  force_pdfplumber: true
   
   # Transaction table structure
   table_structure:
