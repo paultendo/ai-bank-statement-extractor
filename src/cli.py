@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from datetime import datetime, timezone
 
 from .utils.logger import setup_logger
 from .config import get_bank_config_loader
@@ -53,7 +54,6 @@ def extract(file_path, output, format, bank, use_vision, json_path):
     # Run extraction pipeline
     from .pipeline import ExtractionPipeline
     import json
-    from rich.progress import Progress, SpinnerColumn, TextColumn
 
     pipeline = ExtractionPipeline()
 
@@ -135,34 +135,149 @@ def banks():
 
 @cli.command()
 @click.argument('directory', type=click.Path(exists=True))
-@click.option('--output-dir', '-o', type=click.Path(), help='Output directory')
-@click.option('--format', '-f', type=click.Choice(['xlsx', 'csv']), default='xlsx')
-def batch(directory, output_dir, format):
-    """
-    Process multiple bank statements in a directory.
-
-    DIRECTORY: Path to directory containing statements
-    """
+@click.option('--output-dir', '-o', type=click.Path(), help='Directory to write statement outputs (defaults to <directory>/batch_output)')
+@click.option('--format', '-f', type=click.Choice(['xlsx']), default='xlsx', show_default=True)
+@click.option('--bank', '-b', help='Force a specific bank parser for every file')
+@click.option('--json-dir', type=click.Path(), help='Optional directory to store per-file JSON payloads')
+@click.option('--manifest', type=click.Path(), help='Optional path for batch summary JSON (defaults to <output-dir>/batch_summary.json)')
+@click.option('--limit', type=int, help='Process only the first N files (useful for dry runs)')
+@click.option('--skip-existing', is_flag=True, help='Skip files whose output already exists in the output directory')
+def batch(directory, output_dir, format, bank, json_dir, manifest, limit, skip_existing):
+    """Process every statement file in DIRECTORY and emit a manifest."""
     directory = Path(directory)
 
     if not directory.is_dir():
         console.print(f"[red]Error: Not a directory: {directory}[/red]")
         sys.exit(1)
 
-    # Find all PDF and image files
-    files = list(directory.glob("*.pdf")) + \
-            list(directory.glob("*.jpg")) + \
-            list(directory.glob("*.jpeg")) + \
-            list(directory.glob("*.png"))
+    # Gather candidate files (PDFs only for now, sorted for deterministic runs)
+    files = sorted(directory.glob("*.pdf"))
 
     if not files:
-        console.print(f"[yellow]No statement files found in {directory}[/yellow]")
+        console.print(f"[yellow]No PDF statements found in {directory}[/yellow]")
         sys.exit(0)
 
-    console.print(f"\n[cyan]Found {len(files)} files to process[/cyan]\n")
+    if limit is not None:
+        files = files[:max(limit, 0)]
 
-    # TODO: Implement batch processing
-    console.print("[yellow]Batch processing not yet implemented[/yellow]")
+    if not files:
+        console.print(f"[yellow]No files left to process after applying limit[/yellow]")
+        sys.exit(0)
+
+    output_dir = Path(output_dir) if output_dir else directory / "batch_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    json_output_dir = Path(json_dir) if json_dir else None
+    if json_output_dir:
+        json_output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = Path(manifest) if manifest else output_dir / "batch_summary.json"
+
+    console.print(f"\n[cyan]Found {len(files)} files to process[/cyan]")
+    console.print(f"[cyan]Output directory:[/cyan] {output_dir}")
+    if json_output_dir:
+        console.print(f"[cyan]JSON directory:[/cyan] {json_output_dir}")
+
+    from .pipeline import ExtractionPipeline
+    import json
+
+    pipeline = ExtractionPipeline()
+    summary_rows = []
+    successes = 0
+    failures = 0
+    skipped = 0
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
+        task = progress.add_task("Processing statements...", total=len(files))
+
+        for file_path in files:
+            progress.update(task, description=f"Processing {file_path.name}")
+            output_path = output_dir / f"{file_path.stem}.{format}"
+            json_path = json_output_dir / f"{file_path.stem}.json" if json_output_dir else None
+
+            if skip_existing and output_path.exists():
+                skipped += 1
+                summary_rows.append({
+                    'file': str(file_path),
+                    'output': str(output_path),
+                    'success': True,
+                    'skipped': True,
+                    'error': None,
+                    'transactions': None,
+                    'bank': None,
+                    'warnings': []
+                })
+                progress.advance(task)
+                continue
+
+            try:
+                result = pipeline.process(
+                    file_path=file_path,
+                    output_path=output_path,
+                    bank_name=bank,
+                    perform_validation=True
+                )
+
+                if json_path:
+                    json_path.write_text(json.dumps(result.to_dict(), indent=2), encoding='utf-8')
+
+                summary_rows.append({
+                    'file': str(file_path),
+                    'output': str(output_path),
+                    'json': str(json_path) if json_path else None,
+                    'success': result.success,
+                    'skipped': False,
+                    'error': result.error_message,
+                    'transactions': result.transaction_count,
+                    'bank': result.statement.bank_name if result.statement else None,
+                    'warnings': result.warnings,
+                    'balance_reconciled': result.balance_reconciled,
+                    'processing_time': round(result.processing_time, 2)
+                })
+
+                if result.success:
+                    successes += 1
+                else:
+                    failures += 1
+
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Batch extraction failed for %s", file_path)
+                failures += 1
+                summary_rows.append({
+                    'file': str(file_path),
+                    'output': str(output_path),
+                    'json': str(json_path) if json_path else None,
+                    'success': False,
+                    'skipped': False,
+                    'error': str(exc),
+                    'transactions': None,
+                    'bank': None,
+                    'warnings': []
+                })
+
+            progress.advance(task)
+
+    # Persist manifest for downstream automation
+    manifest_payload = {
+        'root_directory': str(directory),
+        'output_directory': str(output_dir),
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'results': summary_rows,
+        'totals': {
+            'processed': len(summary_rows),
+            'successes': successes,
+            'failures': failures,
+            'skipped': skipped
+        }
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding='utf-8')
+
+    console.print(f"\n[green]Batch complete[/green] — {successes} succeeded, {failures} failed, {skipped} skipped")
+    console.print(f"Manifest written to: {manifest_path}")
+
+    if failures:
+        console.print("\n[red]Failures detected[/red]. Inspect the manifest for details.")
+        sys.exit(1)
 
 
 @cli.command()
