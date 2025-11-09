@@ -172,7 +172,7 @@ We recently completed a major refactoring of the parser architecture to improve 
 | Santander | ✅ Validated on CurrentAccountStatement_08022024.pdf | 212 txns, Feb 2024 period |
 | TSB | ✅ Validated on “TSB Savings account - Mark Wilcox.pdf” | 31 txns, Oct 2023–Sep 2024 |
 | Monzo | ✅ Validated on “monzo-bidmead.pdf” | 1,035 txns, May–Oct 2024 combined + pot summaries |
-| Nationwide | ⚠️ “Marsh Bankstatements up to April 2024.pdf” | 695 txns Jan–Dec 2023, multi-statement balance mismatch |
+| Nationwide | ✅ “Marsh Bankstatements up to April 2024.pdf” | 623 txns Jan–Dec 2023, layout parser with 13 period breaks |
 
 Additional banks can be enabled quickly by adding YAML configurations and regression fixtures.
 
