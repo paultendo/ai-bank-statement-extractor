@@ -1,0 +1,173 @@
+"""Shared batch-processing utilities for CLI and Streamlit."""
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Iterable, List, Optional, Sequence, TYPE_CHECKING
+
+from .pipeline import ExtractionPipeline
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .models import ExtractionResult
+
+
+@dataclass
+class BatchFileResult:
+    """Per-file summary for a batch run."""
+
+    file: str
+    output: str
+    json: Optional[str]
+    success: bool
+    skipped: bool
+    transactions: Optional[int] = None
+    confidence: Optional[float] = None
+    reconciled: Optional[bool] = None
+    bank: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    processing_time: Optional[float] = None
+
+
+@dataclass
+class BatchRunSummary:
+    """Aggregate summary covering all files processed in a batch."""
+
+    root_directory: Optional[str]
+    output_directory: str
+    generated_at: str
+    results: List[BatchFileResult]
+    totals: dict
+
+    def to_manifest(self) -> dict:
+        """Serialise the summary into a JSON-friendly manifest."""
+        return {
+            'root_directory': self.root_directory,
+            'output_directory': self.output_directory,
+            'generated_at': self.generated_at,
+            'results': [asdict(result) for result in self.results],
+            'totals': self.totals,
+        }
+
+
+def run_batch(
+    files: Sequence[Path] | Iterable[Path],
+    output_dir: Path,
+    *,
+    format: str = 'xlsx',
+    bank: Optional[str] = None,
+    json_output_dir: Optional[Path] = None,
+    skip_existing: bool = False,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    result_handler: Optional[Callable[[Path, 'ExtractionResult'], None]] = None,
+    root_directory: Optional[Path] = None,
+) -> BatchRunSummary:
+    """Process files with the ExtractionPipeline and return a structured summary."""
+
+    file_list = list(files)
+    total_files = len(file_list)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if json_output_dir:
+        json_output_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline = ExtractionPipeline()
+    results: List[BatchFileResult] = []
+    successes = failures = skipped = 0
+
+    for idx, file_path in enumerate(file_list, start=1):
+        output_path = output_dir / f"{file_path.stem}.{format}"
+        json_path = (json_output_dir / f"{file_path.stem}.json") if json_output_dir else None
+
+        if skip_existing and output_path.exists():
+            skipped += 1
+            results.append(
+                BatchFileResult(
+                    file=file_path.name,
+                    output=str(output_path),
+                    json=str(json_path) if json_path else None,
+                    success=True,
+                    skipped=True,
+                    transactions=None,
+                    warnings=[],
+                )
+            )
+            if progress_callback:
+                progress_callback(idx, total_files, file_path.name)
+            continue
+
+        try:
+            result = pipeline.process(
+                file_path=file_path,
+                output_path=output_path,
+                bank_name=bank,
+                perform_validation=True,
+            )
+
+            if result_handler and result.success:
+                result_handler(file_path, result)
+
+            if json_path:
+                json_path.write_text(json.dumps(result.to_dict(), indent=2), encoding='utf-8')
+
+            row = BatchFileResult(
+                file=file_path.name,
+                output=str(output_path),
+                json=str(json_path) if json_path else None,
+                success=result.success,
+                skipped=False,
+                transactions=result.transaction_count,
+                confidence=result.confidence_score,
+                reconciled=result.balance_reconciled,
+                bank=result.statement.bank_name if result.statement else None,
+                warnings=list(result.warnings),
+                error=result.error_message if not result.success else None,
+                processing_time=result.processing_time,
+            )
+
+            if result.success:
+                successes += 1
+            else:
+                failures += 1
+
+            results.append(row)
+
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            results.append(
+                BatchFileResult(
+                    file=file_path.name,
+                    output=str(output_path),
+                    json=str(json_path) if json_path else None,
+                    success=False,
+                    skipped=False,
+                    error=str(exc),
+                    transactions=None,
+                    warnings=[],
+                )
+            )
+        finally:
+            if progress_callback:
+                progress_callback(idx, total_files, file_path.name)
+
+    summary = BatchRunSummary(
+        root_directory=str(root_directory) if root_directory else None,
+        output_directory=str(output_dir),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        results=results,
+        totals={
+            'processed': total_files,
+            'successes': successes,
+            'failures': failures,
+            'skipped': skipped,
+        },
+    )
+
+    return summary
+
+
+def write_manifest(summary: BatchRunSummary, manifest_path: Path) -> None:
+    """Persist a BatchRunSummary manifest to disk."""
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(summary.to_manifest(), indent=2), encoding='utf-8')

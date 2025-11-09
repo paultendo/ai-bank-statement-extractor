@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from .utils.logger import setup_logger
 from .config import get_bank_config_loader
+from .batch_runner import run_batch, write_manifest
 
 console = Console()
 logger = setup_logger()
@@ -150,7 +151,6 @@ def batch(directory, output_dir, format, bank, json_dir, manifest, limit, skip_e
         console.print(f"[red]Error: Not a directory: {directory}[/red]")
         sys.exit(1)
 
-    # Gather candidate files (PDFs only for now, sorted for deterministic runs)
     files = sorted(directory.glob("*.pdf"))
 
     if not files:
@@ -178,106 +178,35 @@ def batch(directory, output_dir, format, bank, json_dir, manifest, limit, skip_e
     if json_output_dir:
         console.print(f"[cyan]JSON directory:[/cyan] {json_output_dir}")
 
-    from .pipeline import ExtractionPipeline
-    import json
-
-    pipeline = ExtractionPipeline()
-    summary_rows = []
-    successes = 0
-    failures = 0
-    skipped = 0
+    def cli_progress(idx: int, total: int, name: str) -> None:
+        progress.update(task, description=f"Processing {name}", completed=idx)
 
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
         task = progress.add_task("Processing statements...", total=len(files))
+        summary = run_batch(
+            files,
+            output_dir=output_dir,
+            format=format,
+            bank=bank,
+            json_output_dir=json_output_dir,
+            skip_existing=skip_existing,
+            progress_callback=cli_progress,
+            root_directory=directory,
+        )
+        progress.update(task, description="Batch complete", completed=len(files))
 
-        for file_path in files:
-            progress.update(task, description=f"Processing {file_path.name}")
-            output_path = output_dir / f"{file_path.stem}.{format}"
-            json_path = json_output_dir / f"{file_path.stem}.json" if json_output_dir else None
+    write_manifest(summary, manifest_path)
 
-            if skip_existing and output_path.exists():
-                skipped += 1
-                summary_rows.append({
-                    'file': str(file_path),
-                    'output': str(output_path),
-                    'success': True,
-                    'skipped': True,
-                    'error': None,
-                    'transactions': None,
-                    'bank': None,
-                    'warnings': []
-                })
-                progress.advance(task)
-                continue
-
-            try:
-                result = pipeline.process(
-                    file_path=file_path,
-                    output_path=output_path,
-                    bank_name=bank,
-                    perform_validation=True
-                )
-
-                if json_path:
-                    json_path.write_text(json.dumps(result.to_dict(), indent=2), encoding='utf-8')
-
-                summary_rows.append({
-                    'file': str(file_path),
-                    'output': str(output_path),
-                    'json': str(json_path) if json_path else None,
-                    'success': result.success,
-                    'skipped': False,
-                    'error': result.error_message,
-                    'transactions': result.transaction_count,
-                    'bank': result.statement.bank_name if result.statement else None,
-                    'warnings': result.warnings,
-                    'balance_reconciled': result.balance_reconciled,
-                    'processing_time': round(result.processing_time, 2)
-                })
-
-                if result.success:
-                    successes += 1
-                else:
-                    failures += 1
-
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Batch extraction failed for %s", file_path)
-                failures += 1
-                summary_rows.append({
-                    'file': str(file_path),
-                    'output': str(output_path),
-                    'json': str(json_path) if json_path else None,
-                    'success': False,
-                    'skipped': False,
-                    'error': str(exc),
-                    'transactions': None,
-                    'bank': None,
-                    'warnings': []
-                })
-
-            progress.advance(task)
-
-    # Persist manifest for downstream automation
-    manifest_payload = {
-        'root_directory': str(directory),
-        'output_directory': str(output_dir),
-        'generated_at': datetime.now(timezone.utc).isoformat(),
-        'results': summary_rows,
-        'totals': {
-            'processed': len(summary_rows),
-            'successes': successes,
-            'failures': failures,
-            'skipped': skipped
-        }
-    }
-    manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding='utf-8')
-
-    console.print(f"\n[green]Batch complete[/green] — {successes} succeeded, {failures} failed, {skipped} skipped")
+    totals = summary.totals
+    console.print(
+        f"\n[green]Batch complete[/green] — {totals['successes']} succeeded, {totals['failures']} failed, {totals['skipped']} skipped"
+    )
     console.print(f"Manifest written to: {manifest_path}")
 
-    if failures:
+    if totals['failures']:
         console.print("\n[red]Failures detected[/red]. Inspect the manifest for details.")
         sys.exit(1)
+
 
 
 @cli.command()
