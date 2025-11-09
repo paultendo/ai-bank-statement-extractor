@@ -44,9 +44,14 @@ def extract(file_path, output, format, bank, use_vision, json_path):
         console.print(f"[red]Error: File not found: {file_path}[/red]")
         sys.exit(1)
 
+    export_format = format.lower()
+    if export_format not in {'xlsx', 'csv'}:
+        console.print(f"[red]Unsupported format: {format}[/red]")
+        sys.exit(1)
+
     # Default output path
     if not output:
-        output = file_path.with_suffix(f'.{format}')
+        output = file_path.with_suffix(f'.{export_format}')
 
     console.print(f"[cyan]Processing:[/cyan] {file_path.name}")
     if output:
@@ -70,7 +75,8 @@ def extract(file_path, output, format, bank, use_vision, json_path):
                 file_path=file_path,
                 output_path=Path(output) if output else None,
                 bank_name=bank,
-                perform_validation=True
+                perform_validation=True,
+                export_format=export_format
             )
 
             if json_path:

@@ -11,6 +11,8 @@ from typing import Optional
 import re
 from datetime import datetime
 
+import pandas as pd
+
 from .models import ExtractionResult, Statement
 from .extractors import PDFExtractor
 from .extractors.pdftotext_extractor import PDFToTextExtractor
@@ -50,7 +52,8 @@ class ExtractionPipeline:
         file_path: Path,
         output_path: Optional[Path] = None,
         bank_name: Optional[str] = None,
-        perform_validation: bool = True
+        perform_validation: bool = True,
+        export_format: str = 'xlsx'
     ) -> ExtractionResult:
         """
         Process a bank statement end-to-end.
@@ -294,7 +297,14 @@ class ExtractionPipeline:
                     statement_date=statement.statement_start_date
                 )
 
-            self.exporter.export(result, output_path)
+            export_format = export_format.lower()
+            if export_format == 'csv':
+                output_path = output_path.with_suffix('.csv')
+                self._export_csv(result, output_path)
+            else:
+                output_path = output_path.with_suffix('.xlsx')
+                self.exporter.export(result, output_path)
+
             logger.info(f"✓ Export complete: {output_path}")
 
             # Log audit trail
@@ -869,3 +879,22 @@ class ExtractionPipeline:
             error_message=error_message,
             processing_time=processing_time
         )
+
+    @staticmethod
+    def _export_csv(result: ExtractionResult, output_path: Path) -> None:
+        """Export transactions to CSV for downstream analysis."""
+        rows = []
+        for txn in result.transactions:
+            rows.append({
+                'Date': txn.date.strftime('%Y-%m-%d') if txn.date else '',
+                'Description': txn.description,
+                'Money In': txn.money_in,
+                'Money Out': txn.money_out,
+                'Balance': txn.balance,
+                'Type': txn.transaction_type.value if txn.transaction_type else '',
+                'Confidence': txn.confidence,
+            })
+
+        df = pd.DataFrame(rows)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(output_path, index=False)

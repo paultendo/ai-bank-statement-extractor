@@ -66,6 +66,10 @@ def run_batch(
 ) -> BatchRunSummary:
     """Process files with the ExtractionPipeline and return a structured summary."""
 
+    export_format = format.lower()
+    if export_format not in {'xlsx', 'csv'}:
+        raise ValueError(f"Unsupported export format: {format}")
+
     file_list = list(files)
     total_files = len(file_list)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,7 +81,7 @@ def run_batch(
     successes = failures = skipped = 0
 
     for idx, file_path in enumerate(file_list, start=1):
-        output_path = output_dir / f"{file_path.stem}.{format}"
+        output_path = output_dir / f"{file_path.stem}.{export_format}"
         json_path = (json_output_dir / f"{file_path.stem}.json") if json_output_dir else None
 
         if skip_existing and output_path.exists():
@@ -103,6 +107,7 @@ def run_batch(
                 output_path=output_path,
                 bank_name=bank,
                 perform_validation=True,
+                export_format=export_format,
             )
 
             if result_handler and result.success:
