@@ -15,6 +15,7 @@ Format characteristics:
 - Foreign currency transactions (3+ amounts on one line)
 """
 
+import calendar
 import logging
 import re
 from datetime import datetime
@@ -140,9 +141,13 @@ class NatWestParser(BaseTransactionParser):
 
             # Check if this line starts with a date - update current date
             # Supports both "18 DEC 2024" (month name) and "16/04/2024" (numeric) formats
-            date_match = re.match(r'^\s*(\d{1,2}/\d{1,2}/\d{4}|\d{1,2}\s+[A-Z]{3}(?:\s+\d{2,4})?)', line, re.IGNORECASE)
+            date_match = re.match(
+                r'^\s*(\d{1,2}/\d{1,2}/\d{4}|\d{1,2}\s+[A-Z]{3}(?:\s+\d{2,4})?|\d{1,2}[A-Z]{3}\d{2,4})',
+                line,
+                re.IGNORECASE
+            )
             if date_match:
-                current_date_str = date_match.group(1)
+                current_date_str = self._normalize_date_token(date_match.group(1))
                 logger.debug(f"Found date: {current_date_str}")
 
             # Check if this line has amounts (is a transaction line)
@@ -542,8 +547,9 @@ class NatWestParser(BaseTransactionParser):
             return None
 
         if statement_start_date and statement_end_date:
+            date_for_inference = self._apply_leap_year_hint(date_str, statement_start_date, statement_end_date)
             transaction_date = infer_year_from_period(
-                date_str,
+                date_for_inference,
                 statement_start_date,
                 statement_end_date
             )
@@ -581,7 +587,10 @@ class NatWestParser(BaseTransactionParser):
             # More than 2 amounts (e.g., foreign currency with exchange rate and fees)
             # Pattern: "USD 20.00 VRATE 1.2730 N-S TRN FEE 0.43    16.14    42,193.81"
             # Last amount = balance, second-to-last = transaction amount
-            logger.warning(f"Found {len(amount_matches)} amounts, expected 1 or 2: {line[:80]}")
+            if self._is_forex_or_fee_line(line):
+                logger.debug(f"Handling FX/fee line with {len(amount_matches)} amounts: {line[:80]}")
+            else:
+                logger.warning(f"Found {len(amount_matches)} amounts, expected 1 or 2: {line[:80]}")
             balance = parse_currency(amount_matches[-1]) or 0.0
             transaction_amount = parse_currency(amount_matches[-2]) or 0.0
 
@@ -591,6 +600,9 @@ class NatWestParser(BaseTransactionParser):
                 money_out = transaction_amount
             else:
                 money_in = transaction_amount
+
+        if 'N-S TRN FEE' in line.upper() and 'N-S TRN FEE' not in description.upper():
+            description = f"{description} N-S TRN FEE".strip()
 
         # Detect transaction type
         transaction_type = self._detect_transaction_type(description)
@@ -614,3 +626,42 @@ class NatWestParser(BaseTransactionParser):
             confidence=confidence,
             raw_text=line[:100]
         )
+
+    @staticmethod
+    def _normalize_date_token(token: str) -> str:
+        """Normalize compact NatWest date tokens like 21FEB24 or 29 FEB."""
+        if not token:
+            return token
+        compact = re.match(r'^(\d{1,2})([A-Z]{3})(\d{2,4})?$', token.strip(), re.IGNORECASE)
+        if compact:
+            parts = [compact.group(1), compact.group(2)]
+            if compact.group(3):
+                parts.append(compact.group(3))
+            token = ' '.join(parts)
+        return token.title()
+
+    @staticmethod
+    def _is_forex_or_fee_line(line: str) -> bool:
+        """Heuristically detect FX rate / non-sterling fee rows with extra numbers."""
+        if not line:
+            return False
+        keywords = ['N-S TRN FEE', 'VRATE', 'NON STERLING', 'FX RATE', 'CASH BACK', 'XFER']
+        upper_line = line.upper()
+        return any(keyword in upper_line for keyword in keywords)
+
+    @staticmethod
+    def _apply_leap_year_hint(date_str: str, period_start: datetime, period_end: datetime) -> str:
+        """Append a leap-year hint for bare '29 FEB' dates to avoid parse warnings."""
+        if not date_str or re.search(r'\d{4}', date_str):
+            return date_str
+        compact = re.match(r'^\s*(\d{1,2})\s+([A-Z]{3})\s*$', date_str.upper())
+        if not compact:
+            return date_str
+        day = int(compact.group(1))
+        month = compact.group(2)
+        if day != 29 or month != 'FEB':
+            return date_str
+        for year in {period_start.year, period_end.year}:
+            if calendar.isleap(year):
+                return f"{day:02d} Feb {year}"
+        return date_str
